@@ -91,6 +91,38 @@ Agent Execution
 | **Circuit Breaker** | Any agent repeating identical tool calls 3+ rounds → abort with diagnostics |
 | **Checkpoint Recovery** | Agent crashed mid-analysis → resume from last checkpoint, not from scratch |
 
+### Initial Harness Scope
+
+The first implementation keeps the harness intentionally small. The goal is to make every agent round observable and controllable before adding heavier recovery or verification logic.
+
+**RuntimeHarness v0 responsibilities:**
+
+1. Wrap every agent round with `pre_round` and `post_round` hooks.
+2. Enforce per-agent round budgets from `agent_profiles.yaml`.
+3. Append one journal event per round.
+4. Track tool calls and trip a circuit breaker on repeated identical calls.
+5. Save a lightweight checkpoint after each successful round.
+6. Return a simple decision: `continue`, `stop`, `retry`, `rework`, or `abort`.
+
+Minimal round event:
+
+```json
+{
+  "run_id": "run_20260603_001",
+  "agent": "collector",
+  "round": 2,
+  "tool_calls": [
+    {"name": "web_fetch", "args": {"url": "https://example.com/report"}}
+  ],
+  "output_artifact_ids": ["source_003"],
+  "signals": ["progress"],
+  "decision": "continue",
+  "timestamp": "2026-06-03T14:22:01Z"
+}
+```
+
+In v0, the hallucination tripwire is conservative: it only checks claims that already declare source references. Deeper claim extraction and semantic verification can come later, after the journal and artifact contracts are stable.
+
 ---
 
 ## Provenance & Audit
@@ -123,7 +155,7 @@ Report claim: "Competitor X has 35% market share in APAC"
 }
 ```
 
-Every analyst claim carries a `causal_chain` back to source data. No unsourced claims.
+In Phase 1, every factual claim should carry source ids. In later phases, each source id is expanded into a full `causal_chain` back through the journal events that created it. No final factual claim should be emitted without source references.
 
 ---
 
@@ -132,7 +164,7 @@ Every analyst claim carries a `causal_chain` back to source data. No unsourced c
 | Dimension | Metric | Target |
 |---|---|---|
 | **Completeness** | Required sections present (overview, features, pricing, SWOT, etc.) | 100% |
-| **Source Coverage** | Claims backed by ≥1 source | ≥ 95% |
+| **Source Coverage** | Factual claims backed by ≥1 source id | 100% |
 | **Factual Accuracy** | Quality Reviewer pass rate | ≥ 90% |
 | **Agent Health** | Tasks completed without circuit breaker trip | ≥ 95% |
 | **Cost Efficiency** | Avg tokens per analysis | tracked, not gated |
@@ -198,27 +230,34 @@ competitive-intel-agents/
 ├── src/
 │   ├── agents/           # Collector, Analyst, Writer, Reviewer
 │   ├── orchestrator/     # Task decomposition, DAG, agent profiles
-│   ├── runtime/          # Agent loop, circuit breaker, stall detection
+│   ├── runtime/          # Model/tool execution
 │   ├── journal/          # Decision record, provenance chain
-│   ├── harness/          # Quality verification, tripwire, checkpoint
+│   ├── harness/          # RuntimeHarness, signals, budgets, checkpoint
+│   ├── cli/              # Command-line entrypoint
 │   └── dashboard/        # Observability UI
 ├── tests/
 │   ├── golden/           # Golden case regression suite
+│   ├── fixtures/         # Fake requests and expected shapes
 │   └── unit/             # Per-component tests
+├── docs/
+│   ├── SPEC_CODING_PLAN.md
+│   └── modules/          # Small module specs for incremental development
 ├── config/
 │   └── agent_profiles.yaml
 └── README.md
 ```
 
+For incremental implementation, see the [Spec Coding Plan](docs/SPEC_CODING_PLAN.md). It breaks the system into small modules with goals, public contracts, tests, and done criteria.
+
 ---
 
 ## Project Status
 
-**Phase 1 (current)**: Core pipeline — single agent loop, basic 4-agent orchestration, end-to-end flow.
+**Phase 1 (current)**: Core pipeline + minimal harness — single agent loop, basic 4-agent orchestration, end-to-end flow, round journaling, budget checks, repeated-tool circuit breaker.
 
-**Phase 2**: Reliability layer — stall detection, circuit breaker, checkpoint recovery per agent.
+**Phase 2**: Reliability layer — stronger stall detection, checkpoint recovery per agent, retry policies.
 
-**Phase 3**: Provenance — full causal chain, audit trail, claim-to-source traceability.
+**Phase 3**: Provenance — full causal chain, audit trail, claim-to-source traceability beyond Phase 1 source ids.
 
 **Phase 4**: Quality system — structured reviewer feedback loop, golden case regression.
 
