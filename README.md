@@ -237,10 +237,15 @@ competitive-intel-agents/
 ├── tests/
 │   ├── golden/           # Golden case regression suite
 │   └── unit/             # Per-component tests
+├── docs/
+│   ├── SPEC_CODING_PLAN.md
+│   └── modules/          # Small module specs for incremental development
 ├── config/
 │   └── agent_profiles.yaml
 └── README.md
 ```
+
+For incremental implementation, see the [Spec Coding Plan](docs/SPEC_CODING_PLAN.md). It breaks the system into small modules with goals, public contracts, tests, and done criteria.
 
 ---
 
