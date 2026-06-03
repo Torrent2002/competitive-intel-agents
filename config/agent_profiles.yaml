@@ -1,0 +1,26 @@
+collector:
+  max_rounds: 10
+  allowed_tools:
+    - web_search
+    - web_fetch
+  model: fake
+  strategy: collect_sources
+
+analyst:
+  max_rounds: 15
+  allowed_tools: []
+  model: fake
+  strategy: produce_sourced_claims
+
+writer:
+  max_rounds: 8
+  allowed_tools: []
+  model: fake
+  strategy: draft_report
+
+reviewer:
+  max_rounds: 4
+  allowed_tools: []
+  model: fake
+  strategy: verify_report
+
