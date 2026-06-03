@@ -241,6 +241,6 @@ Required shared models:
 
 ## Done Criteria
 
-- Models are importable from one stable module.
+- Models are importable from one stable module: `competitive_intel_agents.models`.
 - Tests cover valid and invalid examples.
 - No storage or runtime behavior is mixed into the models.

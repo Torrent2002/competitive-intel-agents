@@ -27,6 +27,7 @@ src/
   competitive_intel_agents/
     agents/
     artifacts/
+    cli/
     dashboard/
     harness/
     journal/
