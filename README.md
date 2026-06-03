@@ -155,7 +155,7 @@ Report claim: "Competitor X has 35% market share in APAC"
 }
 ```
 
-Every analyst claim carries a `causal_chain` back to source data. No unsourced claims.
+In Phase 1, every factual claim should carry source ids. In later phases, each source id is expanded into a full `causal_chain` back through the journal events that created it. No final factual claim should be emitted without source references.
 
 ---
 
@@ -164,7 +164,7 @@ Every analyst claim carries a `causal_chain` back to source data. No unsourced c
 | Dimension | Metric | Target |
 |---|---|---|
 | **Completeness** | Required sections present (overview, features, pricing, SWOT, etc.) | 100% |
-| **Source Coverage** | Claims backed by ≥1 source | ≥ 95% |
+| **Source Coverage** | Factual claims backed by ≥1 source id | 100% |
 | **Factual Accuracy** | Quality Reviewer pass rate | ≥ 90% |
 | **Agent Health** | Tasks completed without circuit breaker trip | ≥ 95% |
 | **Cost Efficiency** | Avg tokens per analysis | tracked, not gated |
@@ -230,12 +230,14 @@ competitive-intel-agents/
 ├── src/
 │   ├── agents/           # Collector, Analyst, Writer, Reviewer
 │   ├── orchestrator/     # Task decomposition, DAG, agent profiles
-│   ├── runtime/          # Agent loop and model/tool execution
+│   ├── runtime/          # Model/tool execution
 │   ├── journal/          # Decision record, provenance chain
 │   ├── harness/          # RuntimeHarness, signals, budgets, checkpoint
+│   ├── cli/              # Command-line entrypoint
 │   └── dashboard/        # Observability UI
 ├── tests/
 │   ├── golden/           # Golden case regression suite
+│   ├── fixtures/         # Fake requests and expected shapes
 │   └── unit/             # Per-component tests
 ├── docs/
 │   ├── SPEC_CODING_PLAN.md
@@ -255,7 +257,7 @@ For incremental implementation, see the [Spec Coding Plan](docs/SPEC_CODING_PLAN
 
 **Phase 2**: Reliability layer — stronger stall detection, checkpoint recovery per agent, retry policies.
 
-**Phase 3**: Provenance — full causal chain, audit trail, claim-to-source traceability.
+**Phase 3**: Provenance — full causal chain, audit trail, claim-to-source traceability beyond Phase 1 source ids.
 
 **Phase 4**: Quality system — structured reviewer feedback loop, golden case regression.
 

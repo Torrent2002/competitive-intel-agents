@@ -1,4 +1,4 @@
-# 03 Journal Store
+# 04 Journal Store
 
 ## Goal
 
@@ -43,4 +43,3 @@ Start with an in-memory implementation and a SQLite implementation behind the sa
 
 - Harness can depend on `JournalStore` without knowing the storage backend.
 - A run's event trail can be printed or inspected in tests.
-

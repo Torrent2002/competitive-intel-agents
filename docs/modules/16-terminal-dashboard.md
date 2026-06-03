@@ -1,4 +1,4 @@
-# 14 Terminal Dashboard
+# 16 Terminal Dashboard
 
 ## Goal
 
@@ -38,4 +38,3 @@ Out of scope:
 
 - A completed run can be inspected in the terminal.
 - Dashboard reads from stores, not from agent internals.
-

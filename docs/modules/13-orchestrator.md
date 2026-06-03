@@ -1,4 +1,4 @@
-# 12 Orchestrator
+# 13 Orchestrator
 
 ## Goal
 
@@ -12,6 +12,7 @@ In scope:
 - Load agent profiles.
 - Execute default DAG.
 - Pass shared stores to agents.
+- Pass only each agent's allowed repository/tool/model capabilities.
 - Stop on approval or abort.
 
 Out of scope:
@@ -19,6 +20,7 @@ Out of scope:
 - Dynamic DAG optimization.
 - Multi-run scheduling.
 - Web UI.
+- CLI parsing.
 
 ## Default DAG
 
@@ -42,6 +44,6 @@ class Orchestrator:
 
 ## Done Criteria
 
-- One command can run a full fake pipeline end to end.
+- The orchestrator can run a full fake pipeline end to end.
+- The CLI can call the orchestrator without duplicating orchestration logic.
 - Real agents can be added without changing orchestrator control flow.
-

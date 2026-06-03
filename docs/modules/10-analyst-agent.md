@@ -1,4 +1,4 @@
-# 09 Analyst Agent
+# 10 Analyst Agent
 
 ## Goal
 
@@ -23,6 +23,7 @@ Out of scope:
 
 - `SourceArtifact` records.
 - Analysis task from orchestrator.
+- Analyst-scoped `ReviewFeedback` during rework.
 
 ## Outputs
 
@@ -33,10 +34,10 @@ Out of scope:
 - Produces claims with source ids.
 - Rejects or skips claims without sources.
 - Does not call web tools.
+- Reads only active source artifacts.
 - Emits completion when required sections have enough claims.
 
 ## Done Criteria
 
 - Analyst output can be traced back to collector sources.
 - Writer can consume claims without reading raw web pages.
-

@@ -1,4 +1,4 @@
-# 08 Collector Agent
+# 09 Collector Agent
 
 ## Goal
 
@@ -41,4 +41,3 @@ Out of scope:
 
 - Collector can run through the harness.
 - Source artifacts include url, title, snippet, and retrieval timestamp.
-

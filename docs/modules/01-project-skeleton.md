@@ -10,6 +10,7 @@ In scope:
 
 - Python package layout under `src/`.
 - Test layout under `tests/`.
+- Fixture layout under `tests/fixtures/`.
 - Config layout under `config/`.
 - Basic packaging files.
 
@@ -34,6 +35,8 @@ src/
 config/
   agent_profiles.yaml
 tests/
+  fixtures/
+    request.json
   unit/
   golden/
 ```
@@ -46,11 +49,18 @@ The package should be importable:
 import competitive_intel_agents
 ```
 
+The CLI command should be registered, even if it only runs a fake pipeline at first:
+
+```text
+competitive-intel run --input tests/fixtures/request.json
+```
+
 ## Suggested Files
 
 - `pyproject.toml`
 - `src/competitive_intel_agents/__init__.py`
 - `config/agent_profiles.yaml`
+- `tests/fixtures/request.json`
 - `tests/unit/test_imports.py`
 
 ## Tests
@@ -58,10 +68,11 @@ import competitive_intel_agents
 - Verify the package imports.
 - Verify expected top-level modules import.
 - Verify `config/agent_profiles.yaml` exists.
+- Verify `tests/fixtures/request.json` exists and has valid JSON.
 
 ## Done Criteria
 
 - `pytest` runs.
 - Package imports from a clean checkout.
+- CLI entrypoint is registered.
 - No agent behavior is implemented yet.
-

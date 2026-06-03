@@ -1,4 +1,4 @@
-# 15 Golden Replay
+# 17 Golden Replay
 
 ## Goal
 
@@ -48,4 +48,3 @@ tests/golden/
 
 - Golden replay can run in CI.
 - Failures point to the specific metric that regressed.
-

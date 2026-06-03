@@ -1,4 +1,4 @@
-# 05 Runtime Harness
+# 08 Runtime Harness
 
 ## Goal
 
@@ -48,10 +48,10 @@ class RuntimeHarness:
 - Aborts after repeated identical tool calls.
 - Appends one journal event per round.
 - Saves checkpoint after successful round.
+- Uses stable `ToolCall` signatures for repeated-call checks.
 
 ## Done Criteria
 
 - Fake agents can be run through the harness.
 - Harness output is deterministic in tests.
 - Journal events include decision and signals.
-
