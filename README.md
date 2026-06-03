@@ -91,6 +91,38 @@ Agent Execution
 | **Circuit Breaker** | Any agent repeating identical tool calls 3+ rounds → abort with diagnostics |
 | **Checkpoint Recovery** | Agent crashed mid-analysis → resume from last checkpoint, not from scratch |
 
+### Initial Harness Scope
+
+The first implementation keeps the harness intentionally small. The goal is to make every agent round observable and controllable before adding heavier recovery or verification logic.
+
+**RuntimeHarness v0 responsibilities:**
+
+1. Wrap every agent round with `pre_round` and `post_round` hooks.
+2. Enforce per-agent round budgets from `agent_profiles.yaml`.
+3. Append one journal event per round.
+4. Track tool calls and trip a circuit breaker on repeated identical calls.
+5. Save a lightweight checkpoint after each successful round.
+6. Return a simple decision: `continue`, `stop`, `retry`, `rework`, or `abort`.
+
+Minimal round event:
+
+```json
+{
+  "run_id": "run_20260603_001",
+  "agent": "collector",
+  "round": 2,
+  "tool_calls": [
+    {"name": "web_fetch", "args": {"url": "https://example.com/report"}}
+  ],
+  "output_artifact_ids": ["source_003"],
+  "signals": ["progress"],
+  "decision": "continue",
+  "timestamp": "2026-06-03T14:22:01Z"
+}
+```
+
+In v0, the hallucination tripwire is conservative: it only checks claims that already declare source references. Deeper claim extraction and semantic verification can come later, after the journal and artifact contracts are stable.
+
 ---
 
 ## Provenance & Audit
@@ -198,9 +230,9 @@ competitive-intel-agents/
 ├── src/
 │   ├── agents/           # Collector, Analyst, Writer, Reviewer
 │   ├── orchestrator/     # Task decomposition, DAG, agent profiles
-│   ├── runtime/          # Agent loop, circuit breaker, stall detection
+│   ├── runtime/          # Agent loop and model/tool execution
 │   ├── journal/          # Decision record, provenance chain
-│   ├── harness/          # Quality verification, tripwire, checkpoint
+│   ├── harness/          # RuntimeHarness, signals, budgets, checkpoint
 │   └── dashboard/        # Observability UI
 ├── tests/
 │   ├── golden/           # Golden case regression suite
@@ -214,9 +246,9 @@ competitive-intel-agents/
 
 ## Project Status
 
-**Phase 1 (current)**: Core pipeline — single agent loop, basic 4-agent orchestration, end-to-end flow.
+**Phase 1 (current)**: Core pipeline + minimal harness — single agent loop, basic 4-agent orchestration, end-to-end flow, round journaling, budget checks, repeated-tool circuit breaker.
 
-**Phase 2**: Reliability layer — stall detection, circuit breaker, checkpoint recovery per agent.
+**Phase 2**: Reliability layer — stronger stall detection, checkpoint recovery per agent, retry policies.
 
 **Phase 3**: Provenance — full causal chain, audit trail, claim-to-source traceability.
 
