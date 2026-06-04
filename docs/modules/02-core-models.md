@@ -244,3 +244,48 @@ Required shared models:
 - Models are importable from one stable module: `competitive_intel_agents.models`.
 - Tests cover valid and invalid examples.
 - No storage or runtime behavior is mixed into the models.
+
+## 中文学习笔记
+
+### 一句话定位
+
+Core Models 是整个多 agent 系统的共享语言，定义 agent、harness、journal、artifact、reviewer 之间交换数据的结构。
+
+### 面试中怎么讲
+
+这个项目最重要的不是让多个 LLM 顺序调用，而是让每一步都有结构化记录、可审计、可回放。所以我先实现 Core Models，把系统里的核心对象固定下来，比如 `RunContext`、`RoundEvent`、`ToolCall`、`SourceArtifact`、`AnalysisClaim`、`ReviewFeedback`。
+
+有了这些模型之后，后续模块不需要互相猜对方传什么字段。Collector 产出 `SourceArtifact`，Analyst 产出带 `source_ids` 的 `AnalysisClaim`，Writer 产出 `ReportDraft`，Reviewer 产出 `ReviewFeedback`，Harness 产出 `RoundEvent`。这就是系统的 contract。
+
+### 关键设计点
+
+- 所有共享模型统一从 `competitive_intel_agents.models` 导入，避免后续模块分散定义类型。
+- 用 dataclass 做轻量模型，不引入复杂依赖，保持早期实现简单。
+- `AgentName`、`HarnessDecision`、`ArtifactStatus`、`ReviewIssue` 都有限定合法值，非法状态会尽早失败。
+- `AnalysisClaim` 必须带 `source_ids`，这是 Phase 1 provenance 的基础。
+- Artifact 有 `status`、`version`、`supersedes_id`，为后续 rework loop 做准备，避免坏 claim 被覆盖后丢失审计记录。
+- `to_dict()` / `from_dict()` 支持 JSON round-trip，方便后续 journal、artifact store、golden replay 复用。
+
+### 核心对象怎么串起来
+
+一个典型流程可以这样讲：
+
+1. 用户请求被包装成 `CompetitiveIntelRequest`。
+2. Orchestrator 创建 `RunContext`，里面包含 `run_id` 和各 agent profile。
+3. Collector 调用工具，工具请求是 `ToolCall`，结果是 `ToolResult`。
+4. Collector 保存 `SourceArtifact`。
+5. Analyst 基于 source 生成 `AnalysisClaim`，每个 claim 都有 `source_ids`。
+6. Writer 把 claims 组织成 `ReportDraft`。
+7. Reviewer 对报告做检查，问题用 `ReviewFeedback` 表示。
+8. Harness 每轮记录 `RoundEvent`，必要时保存 `Checkpoint`。
+9. 最终运行结果用 `RunResult` 返回。
+
+### 可以被追问时怎么答
+
+如果问为什么不用 Pydantic，可以说：当前阶段目标是最小可行 contract，dataclass 足够表达结构和校验，也避免过早引入依赖。后续如果需要更强 schema validation 或 API 序列化，可以迁移到 Pydantic，但 contract 本身不会变。
+
+如果问为什么 artifact 不直接覆盖，可以说：多 agent 系统需要审计和回放。rework 时直接覆盖旧 artifact 会丢失“为什么改、改了什么”的证据，所以用 `status/version/supersedes_id` 保留历史。
+
+如果问 `source_ids` 和完整 provenance 的区别，可以说：Phase 1 先要求 factual claim 绑定 source id，这是最小可落地的来源约束；Phase 3 再把 source id 展开成完整 causal chain，追到具体 agent round、tool call 和 journal event。
+
+如果问 Core Models 为什么不能有业务逻辑，可以说：它们是跨模块 contract，应该保持纯数据和基础校验。如果混入 storage、LLM 调用或 orchestration 逻辑，会让模块之间耦合变重，也更难测试。
