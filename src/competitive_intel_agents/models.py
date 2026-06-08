@@ -226,6 +226,7 @@ class RoundEvent(SerializableModel):
     round: int
     decision: HarnessDecision
     tool_calls: list[ToolCall] = field(default_factory=list)
+    tool_results: list[ToolResult] = field(default_factory=list)
     output_artifact_ids: list[str] = field(default_factory=list)
     signals: list[str] = field(default_factory=list)
     review_feedback: list["ReviewFeedback"] = field(default_factory=list)
@@ -353,5 +354,6 @@ AgentResult._nested_list_types = {
 }
 RoundEvent._nested_list_types = {
     "tool_calls": ToolCall,
+    "tool_results": ToolResult,
     "review_feedback": ReviewFeedback,
 }

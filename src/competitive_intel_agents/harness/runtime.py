@@ -9,6 +9,7 @@ from competitive_intel_agents.agents import Agent
 from competitive_intel_agents.journal import JournalStore
 from competitive_intel_agents.models import (
     AgentName,
+    AgentRoundResult,
     AgentResult,
     AgentState,
     Checkpoint,
@@ -57,12 +58,15 @@ class RuntimeHarness:
         tool_runtime: ToolRuntime,
         checkpoints: CheckpointStore | None = None,
         repeated_tool_limit: int = 3,
+        max_retries: int = 2,
     ) -> None:
         self._journal = journal
         self._tool_runtime = tool_runtime
         self._checkpoints = checkpoints
         self._repeated_tool_limit = repeated_tool_limit
+        self._max_retries = max_retries
         self._tool_signature_counts: dict[tuple[str, AgentName, str, str], int] = {}
+        self._retry_counts: dict[tuple[str, AgentName, str], int] = {}
 
     def run_agent(self, context: RunContext, agent: Agent) -> AgentResult:
         max_rounds = self._max_rounds(context, agent.name)
@@ -71,14 +75,19 @@ class RuntimeHarness:
         last_decision: HarnessDecision = "abort"
         state_memory: dict[str, object] = {}
 
-        for round_index in range(1, max_rounds + 1):
+        latest_checkpoint = self._latest_checkpoint(context.run_id, agent.name)
+        start_round = latest_checkpoint.round + 1 if latest_checkpoint else 1
+
+        for round_index in range(start_round, max_rounds + 1):
             event = self.run_round(
                 context,
                 agent,
                 round_index=round_index,
                 is_budget_final_round=round_index == max_rounds,
                 state_memory=state_memory,
+                last_checkpoint_id=latest_checkpoint.id if latest_checkpoint else None,
             )
+            latest_checkpoint = None
             output_artifact_ids.extend(event.output_artifact_ids)
             review_feedback.extend(event.review_feedback)
             last_decision = event.decision
@@ -106,11 +115,13 @@ class RuntimeHarness:
         round_index: int,
         is_budget_final_round: bool = False,
         state_memory: dict[str, object] | None = None,
+        last_checkpoint_id: str | None = None,
     ) -> RoundEvent:
         state = AgentState(
             agent=agent.name,
             round=round_index,
             memory=dict(state_memory or {}),
+            last_checkpoint_id=last_checkpoint_id,
         )
         result = agent.run_round(context, state)
 
@@ -124,6 +135,10 @@ class RuntimeHarness:
                 tool_result.to_dict() for tool_result in tool_results
             ]
         signals = [*result.signals, *tool_error_signals]
+        if last_checkpoint_id:
+            signals.append(f"resumed_from_checkpoint:{last_checkpoint_id}")
+        if self._is_stalled(result):
+            signals.append("stalled_round")
         decision = self._decide(
             completed=result.completed,
             has_error=bool(result.error or tool_error_signals),
@@ -141,6 +156,7 @@ class RuntimeHarness:
             round=round_index,
             decision=decision,
             tool_calls=signed_tool_calls,
+            tool_results=tool_results,
             output_artifact_ids=result.output_artifact_ids,
             signals=signals,
             review_feedback=result.review_feedback,
@@ -182,10 +198,16 @@ class RuntimeHarness:
             return "stop"
         if "rework_required" in signals:
             return "rework"
+        if "non_retryable_error" in signals:
+            return "abort"
         if self._has_repeated_tool_call(run_id, agent, signed_tool_calls):
             signals.append("repeated_tool_call")
             return "abort"
-        if has_error:
+        if has_error or "stalled_round" in signals:
+            reason = self._retry_reason(has_error, signals)
+            if self._retry_exhausted(run_id, agent, reason):
+                signals.append("max_retries_exceeded")
+                return "abort"
             return "retry"
         if is_budget_final_round:
             return "abort"
@@ -222,6 +244,45 @@ class RuntimeHarness:
                 state={"round": round_index, "signals": signals},
             )
         )
+
+    def _latest_checkpoint(
+        self,
+        run_id: str,
+        agent: AgentName,
+    ) -> Checkpoint | None:
+        if self._checkpoints is None:
+            return None
+        checkpoints = self._checkpoints.list_checkpoints(run_id, agent)
+        if not checkpoints:
+            return None
+        return max(checkpoints, key=lambda checkpoint: checkpoint.round)
+
+    @staticmethod
+    def _is_stalled(result: AgentRoundResult) -> bool:
+        return (
+            not result.completed
+            and not result.tool_calls
+            and not result.output_artifact_ids
+            and "rework_required" not in result.signals
+        )
+
+    @staticmethod
+    def _retry_reason(has_error: bool, signals: list[str]) -> str:
+        if has_error:
+            return "error"
+        if "stalled_round" in signals:
+            return "stall"
+        return "unknown"
+
+    def _retry_exhausted(
+        self,
+        run_id: str,
+        agent: AgentName,
+        reason: str,
+    ) -> bool:
+        key = (run_id, agent, reason)
+        self._retry_counts[key] = self._retry_counts.get(key, 0) + 1
+        return self._retry_counts[key] > self._max_retries
 
     @staticmethod
     def _max_rounds(context: RunContext, agent: AgentName) -> int:

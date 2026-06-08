@@ -23,6 +23,7 @@ from competitive_intel_agents.models import (
     RunContext,
     RunResult,
 )
+from competitive_intel_agents.rework import ReworkLoop
 from competitive_intel_agents.runtime import FakeWebFetch, FakeWebSearch, ToolRuntime
 
 
@@ -48,12 +49,16 @@ class Orchestrator:
         harness: Harness | None = None,
         agent_profiles: dict[str, AgentProfile] | None = None,
         run_id_factory: Callable[[], str] | None = None,
+        enable_rework: bool = False,
+        max_rework_attempts: int = 2,
     ) -> None:
         self.artifacts = artifacts or InMemoryArtifactStore()
         self.journal = journal or InMemoryJournalStore()
         self._harness = harness or self._default_harness(self.journal)
         self._agent_profiles = agent_profiles or load_agent_profiles()
         self._run_id_factory = run_id_factory or _default_run_id
+        self._enable_rework = enable_rework
+        self._max_rework_attempts = max_rework_attempts
         self.last_context: RunContext | None = None
 
     def run(self, request: CompetitiveIntelRequest) -> RunResult:
@@ -75,6 +80,8 @@ class Orchestrator:
                     error=f"{agent.name} aborted",
                 )
             if result.decision == "rework":
+                if self._enable_rework:
+                    return self._apply_integrated_rework(context, result.review_feedback)
                 return RunResult(
                     run_id=context.run_id,
                     status="needs_rework",
@@ -86,6 +93,55 @@ class Orchestrator:
             run_id=context.run_id,
             status="approved",
             report_id=self._latest_report_id(context.run_id),
+        )
+
+    def _apply_integrated_rework(
+        self,
+        context: RunContext,
+        feedback_items,
+    ) -> RunResult:
+        loop = ReworkLoop(
+            self.artifacts,
+            harness=self._harness,
+            max_attempts=self._max_rework_attempts,
+        )
+        remaining_feedback = list(feedback_items)
+        for _ in range(self._max_rework_attempts):
+            if not remaining_feedback:
+                break
+            rework_result = loop.apply(context, remaining_feedback[0])
+            if rework_result.status != "applied":
+                return RunResult(
+                    run_id=context.run_id,
+                    status="rework_failed",
+                    report_id=self._latest_report_id(context.run_id),
+                    review_feedback=remaining_feedback,
+                    error=rework_result.status,
+                )
+            if rework_result.final_decision == "stop":
+                return RunResult(
+                    run_id=context.run_id,
+                    status="approved",
+                    report_id=self._latest_report_id(context.run_id),
+                )
+            latest_reviewer = self.journal.list_agent_events(
+                context.run_id,
+                "reviewer",
+            )[-1:]
+            if latest_reviewer and latest_reviewer[0].decision == "stop":
+                return RunResult(
+                    run_id=context.run_id,
+                    status="approved",
+                    report_id=self._latest_report_id(context.run_id),
+                )
+            if latest_reviewer and latest_reviewer[0].review_feedback:
+                remaining_feedback = latest_reviewer[0].review_feedback
+        return RunResult(
+            run_id=context.run_id,
+            status="rework_failed",
+            report_id=self._latest_report_id(context.run_id),
+            review_feedback=remaining_feedback,
+            error="max_rework_attempts_exceeded",
         )
 
     def _build_agents(self) -> list[Agent]:

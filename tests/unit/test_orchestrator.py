@@ -121,3 +121,57 @@ def test_orchestrator_returns_needs_rework_with_reviewer_feedback() -> None:
     assert result.status == "needs_rework"
     assert result.review_feedback[0].target_agent == "collector"
     assert harness.agents == ["collector", "analyst", "writer", "reviewer"]
+
+
+def test_orchestrator_can_apply_rework_until_reviewer_approves() -> None:
+    class OneShotWriterFeedbackHarness:
+        def __init__(self) -> None:
+            self.reviewer_calls = 0
+
+        def run_agent(self, context, agent: BaseAgent) -> AgentResult:
+            if agent.name == "reviewer":
+                self.reviewer_calls += 1
+                if self.reviewer_calls == 1:
+                    return AgentResult(
+                        agent="reviewer",
+                        decision="rework",
+                        rounds=1,
+                        review_feedback=[
+                            ReviewFeedback(
+                                issue="missing_section",
+                                target_agent="writer",
+                                target_artifact_id="report_missing",
+                                message="Missing Pricing.",
+                                required_action="Add Pricing.",
+                            )
+                        ],
+                    )
+            return AgentResult(agent=agent.name, decision="stop", rounds=1)
+
+    harness = OneShotWriterFeedbackHarness()
+    orchestrator = Orchestrator(
+        harness=harness,
+        enable_rework=True,
+        run_id_factory=lambda: "run_integrated_rework",
+    )
+
+    result = orchestrator.run(make_request())
+
+    assert result.status == "approved"
+    assert result.review_feedback == []
+    assert harness.reviewer_calls == 2
+
+
+def test_orchestrator_returns_rework_failed_after_max_attempts() -> None:
+    harness = ReworkHarness()
+    orchestrator = Orchestrator(
+        harness=harness,
+        enable_rework=True,
+        max_rework_attempts=1,
+        run_id_factory=lambda: "run_rework_failed",
+    )
+
+    result = orchestrator.run(make_request())
+
+    assert result.status == "rework_failed"
+    assert result.review_feedback[0].target_agent == "collector"

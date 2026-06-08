@@ -20,6 +20,7 @@ def test_package_and_top_level_modules_import() -> None:
         "competitive_intel_agents.journal",
         "competitive_intel_agents.orchestrator",
         "competitive_intel_agents.prompts",
+        "competitive_intel_agents.provenance",
         "competitive_intel_agents.rework",
         "competitive_intel_agents.runtime",
         "competitive_intel_agents.workspace",
