@@ -270,6 +270,63 @@ competitive-intel-agents/
 
 For incremental implementation, see the [Spec Coding Plan](docs/SPEC_CODING_PLAN.md). It breaks the system into small modules with goals, public contracts, tests, and done criteria.
 
+## Local Usage
+
+Run a one-shot fake pipeline:
+
+```bash
+PYTHONPATH=src python -m competitive_intel_agents.cli run \
+  --input tests/fixtures/request.json \
+  --config config/agent_profiles.yaml \
+  --fake-model \
+  --output out/report.md
+```
+
+Run an interactive terminal session:
+
+```bash
+PYTHONPATH=src python -m competitive_intel_agents.cli chat
+```
+
+Enable optional real Web collection for run or chat:
+
+```bash
+PYTHONPATH=src python -m competitive_intel_agents.cli run \
+  --input tests/fixtures/request.json \
+  --workspace .competitive-intel \
+  --real-web \
+  --show-dashboard
+```
+
+Persist a run and inspect it later:
+
+```bash
+PYTHONPATH=src python -m competitive_intel_agents.cli run \
+  --input tests/fixtures/request.json \
+  --workspace .competitive-intel \
+  --show-dashboard
+
+PYTHONPATH=src python -m competitive_intel_agents.cli runs \
+  --workspace .competitive-intel
+
+PYTHONPATH=src python -m competitive_intel_agents.cli dashboard \
+  --run-id run_xxx \
+  --workspace .competitive-intel
+```
+
+If editable install fails because of a system Python or certificate issue, the
+`PYTHONPATH=src python -m ...` form is the supported fallback.
+
+Provider-backed model runtime is available behind environment configuration.
+By default the project uses deterministic fake model output.
+
+```bash
+export CIA_MODEL_PROVIDER=openai-compatible
+export CIA_MODEL_ENDPOINT=https://api.example.com/v1/chat/completions
+export CIA_MODEL_API_KEY=your_api_key
+export CIA_MODEL_NAME=your_model_name
+```
+
 ---
 
 ## Project Status

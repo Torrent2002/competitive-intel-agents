@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Protocol
+from urllib import request as urllib_request
 
 from competitive_intel_agents.models import ModelRequest, ModelResponse
 
@@ -39,11 +41,97 @@ class FakeModelProvider:
         }
 
 
+class JsonPostTransport:
+    """Standard-library JSON POST transport for HTTP model providers."""
+
+    def post_json(
+        self,
+        url: str,
+        headers: dict[str, str],
+        payload: dict,
+        timeout: float = 30.0,
+    ) -> dict:
+        data = json.dumps(payload).encode("utf-8")
+        request = urllib_request.Request(
+            url,
+            data=data,
+            headers={**headers, "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(request, timeout=timeout) as response:
+                body = response.read().decode("utf-8", errors="replace")
+                return json.loads(body)
+        except Exception as exc:
+            raise RuntimeError(f"model provider request failed: {exc}") from exc
+
+
+class HttpModelProvider:
+    """OpenAI-compatible chat completions provider."""
+
+    def __init__(
+        self,
+        endpoint: str,
+        api_key: str,
+        model: str,
+        transport: JsonPostTransport | None = None,
+        timeout: float = 30.0,
+    ) -> None:
+        self.endpoint = endpoint
+        self.api_key = api_key
+        self.model = model
+        self._transport = transport or JsonPostTransport()
+        self._timeout = timeout
+
+    def complete(self, request: ModelRequest) -> dict[str, Any]:
+        payload = {
+            "model": self.model,
+            "messages": request.messages,
+            "temperature": request.temperature,
+        }
+        if request.response_format:
+            payload["response_format"] = {"type": "json_object"}
+        raw = self._transport.post_json(
+            self.endpoint,
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            payload=payload,
+            timeout=self._timeout,
+        )
+        content = raw.get("choices", [{}])[0].get("message", {}).get("content", "")
+        return {
+            "ok": True,
+            "content": content,
+            "usage": raw.get("usage", {}),
+        }
+
+
+class ConfiguredProviderFactory:
+    """Create providers from environment-like config."""
+
+    def __init__(self, env: dict[str, str] | None = None) -> None:
+        self._env = env if env is not None else os.environ
+
+    def create(self) -> Provider:
+        provider = self._env.get("CIA_MODEL_PROVIDER", "fake")
+        if provider == "fake":
+            return FakeModelProvider()
+        if provider in {"openai-compatible", "anthropic-compatible"}:
+            endpoint = self._env.get("CIA_MODEL_ENDPOINT", "")
+            api_key = self._env.get("CIA_MODEL_API_KEY", "")
+            model = self._env.get("CIA_MODEL_NAME", "")
+            if not endpoint or not api_key or not model:
+                raise ValueError(
+                    "CIA_MODEL_ENDPOINT, CIA_MODEL_API_KEY, and CIA_MODEL_NAME are required"
+                )
+            return HttpModelProvider(endpoint=endpoint, api_key=api_key, model=model)
+        raise ValueError(f"unsupported model provider: {provider}")
+
+
 class ModelRuntime:
     """Normalize model calls through a provider, with optional structured parsing."""
 
-    def __init__(self, provider: Provider) -> None:
-        self._provider = provider
+    def __init__(self, provider: Provider | None = None) -> None:
+        self._provider = provider or FakeModelProvider()
 
     def complete(self, request: ModelRequest) -> ModelResponse:
         # Call the provider — catch any exception so the harness never crashes
