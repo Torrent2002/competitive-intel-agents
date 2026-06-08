@@ -131,3 +131,26 @@ Done when:
 - [15 Rework Loop](modules/15-rework-loop.md)
 - [16 Terminal Dashboard](modules/16-terminal-dashboard.md)
 - [17 Golden Replay](modules/17-golden-replay.md)
+
+## V1 Extension Plan
+
+Modules 01-17 complete the v0 architecture core, but README and product goals
+still imply a stronger local operator experience, real adapters, deeper
+provenance, and demo polish. The next implementation sequence is defined in
+[V1 Extension Plan](V1_EXTENSION_PLAN.md).
+
+V1 modules:
+
+- [18 Interactive CLI Session](modules/18-interactive-cli-session.md)
+- [19 Dashboard CLI Command](modules/19-dashboard-cli-command.md)
+- [20 Persistent Local Workspace](modules/20-persistent-local-workspace.md)
+- [21 Real Web Collection Tools](modules/21-real-web-collection-tools.md)
+- [22 Provider-Backed Model Runtime](modules/22-provider-backed-model-runtime.md)
+- [23 Structured Agent Prompts](modules/23-structured-agent-prompts.md)
+- [24 Full Provenance Graph](modules/24-full-provenance-graph.md)
+- [25 Reliability Harness v1](modules/25-reliability-harness-v1.md)
+- [26 Integrated Rework Orchestration](modules/26-integrated-rework-orchestration.md)
+- [27 Basic Web Dashboard](modules/27-basic-web-dashboard.md)
+- [28 Report Export Package](modules/28-report-export-package.md)
+- [29 Golden Suite Expansion and CI](modules/29-golden-suite-ci.md)
+- [30 Demo and Operator Polish](modules/30-demo-operator-polish.md)

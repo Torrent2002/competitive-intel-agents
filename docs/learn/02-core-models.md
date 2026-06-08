@@ -147,6 +147,17 @@ missing_section -> writer
 
 这个字段是“多 agent 协作系统”和“单 agent 自评报告”的关键差异之一。
 
+模块 13 之后，feedback 会继续贯穿到：
+
+```text
+AgentRoundResult.review_feedback
+  -> RoundEvent.review_feedback
+  -> AgentResult.review_feedback
+  -> RunResult.review_feedback
+```
+
+这样 Orchestrator 可以直接返回 `needs_rework`，不用重新跑 Reviewer，也不用解析 journal 里的自然语言。
+
 ### `RoundEvent`
 
 Harness 每轮写入 journal 的事件：
@@ -158,6 +169,7 @@ Harness 每轮写入 journal 的事件：
 - tool_calls
 - output_artifact_ids
 - signals
+- review_feedback
 - timestamp
 
 这是 replay 和 dashboard 的基础。
@@ -208,4 +220,5 @@ test_model_round_trips_through_json
 test_run_context_round_trips_nested_models
 test_round_event_round_trips_nested_tool_calls
 test_agent_round_result_round_trips_review_feedback
+test_agent_result_and_round_event_round_trip_review_feedback
 ```

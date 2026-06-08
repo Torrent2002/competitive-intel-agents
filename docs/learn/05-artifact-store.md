@@ -58,9 +58,11 @@ class ArtifactStore(Protocol):
     def save_report(self, report: ReportDraft) -> None: ...
 
     # 读取 —— 默认只返回 active，隔离 run
-    def list_sources(self, run_id: str) -> list[SourceArtifact]: ...
+    def list_sources(self, run_id: str, status="active") -> list[SourceArtifact]: ...
     def list_claims(self, run_id: str, status="active") -> list[AnalysisClaim]: ...
     def get_latest_report(self, run_id: str) -> ReportDraft | None: ...
+    def list_reports(self, run_id: str, status="active") -> list[ReportDraft]: ...
+    def get_artifact(self, artifact_id: str): ...
 
     # 状态变更 —— 不覆盖旧 artifact，但返回对象必须反映当前状态
     def mark_superseded(self, artifact_id: str, replacement_id: str) -> None: ...
@@ -68,8 +70,10 @@ class ArtifactStore(Protocol):
 ```
 
 重点：
-- `list_sources` **没有** `status` 参数 — source 被 rework 的情况少，默认只返回 active
-- `list_claims` **有** `status` 参数 — claim 是 rework 的主要对象，需要按状态过滤
+- `list_sources`、`list_claims`、`list_reports` 默认只返回 active；
+- 显式传 `status="rejected"` 或 `status="superseded"` 可以做审计；
+- 传 `status=None` 可以跨状态读取，用于 rework 和单调 id 生成；
+- `get_artifact(id)` 可以直接读取某个 artifact 当前状态；
 - `save_*` 禁止重复 id，rework 必须生成新 id
 - `mark_superseded` 要求 `replacement_id` 已经 save 过，并且同 run、同类型、版本向前、`supersedes_id` 指回旧 artifact
 - `get_latest_report` 按 `version` 降序取第一个 active
@@ -150,7 +154,7 @@ A: `supersedes_id` 是新 artifact 创建时声明的"我是谁的新版本"。`
 
 **Q: 如何保证 rejected artifacts 不被下游消费？**
 
-A: 所有 `list_*` 方法默认 `status="active"`，rejected 的 artifact 不会出现在默认结果里。下游 agent 通过 `list_claims(run_id)` 拿到的永远是干净的 active 集合。审计时可以用 `list_claims(run_id, status="rejected")` 显式查询。
+A: 所有 `list_*` 方法默认 `status="active"`，rejected 的 artifact 不会出现在默认结果里。下游 agent 通过 `list_claims(run_id)` 拿到的永远是干净的 active 集合。审计时可以用 `list_claims(run_id, status="rejected")` 或 `get_artifact(id)` 显式查询。
 
 **Q: Artifact 可以从 Journal 重建吗？**
 
@@ -181,6 +185,8 @@ test_mark_old_claims_as_superseded  # 版本链 + 默认不返回 superseded
 test_exclude_rejected_from_default  # rejected 不出现在默认结果
 test_mark_superseded_side_effects   # 只影响目标 artifact
 test_get_latest_report_highest_version  # 多版本取最新
+test_get_artifact_returns_current_status_for_audit # 按 id 审计读取
+test_list_artifacts_can_include_all_statuses # status=None 跨状态读取
 test_rejects_duplicate_artifact_ids # 禁止覆盖旧 artifact
 test_supersede_requires_same_run_and_type # 禁止跨 run / 跨类型替代
 test_supersede_requires_forward_version_and_pointer # 校验版本链

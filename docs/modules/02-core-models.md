@@ -146,6 +146,7 @@ Required shared models:
 - `decision`
 - `rounds`
 - `output_artifact_ids`
+- `review_feedback`
 - `error`
 
 ### RoundEvent
@@ -157,6 +158,7 @@ Required shared models:
 - `tool_calls`
 - `output_artifact_ids`
 - `signals`
+- `review_feedback`
 - `decision`
 - `timestamp`
 
@@ -228,6 +230,7 @@ Required shared models:
 - Claims should carry `source_ids`.
 - Review feedback should carry `issue`, `target_agent`, `target_artifact_id`, and `required_action`.
 - Reviewer round output carries structured feedback in `AgentRoundResult.review_feedback`, so the rework loop can route work without parsing natural language.
+- Harness propagates reviewer feedback into `RoundEvent.review_feedback` and `AgentResult.review_feedback`, so the orchestrator can make run-level decisions without re-running the reviewer or scraping messages.
 - Reworked artifacts must not overwrite old artifacts in place. Create a new artifact id, increment `version`, and set `supersedes_id` to the old artifact id.
 - Artifact ids are immutable once saved. A duplicate artifact id is a contract error, not an upsert.
 - Artifact status must be observed consistently by downstream modules. If a store marks an artifact `superseded` or `rejected`, returned model objects must expose that current `status`.
@@ -245,7 +248,7 @@ Required shared models:
 - Validate artifact status and version fields.
 - Validate agent profile budget and allowed tool fields.
 - Validate JSON serialization and deserialization.
-- Validate `AgentRoundResult` round-trips nested `ReviewFeedback`.
+- Validate `AgentRoundResult`, `AgentResult`, and `RoundEvent` round-trip nested `ReviewFeedback`.
 
 ## Done Criteria
 

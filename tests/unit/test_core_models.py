@@ -185,3 +185,37 @@ def test_agent_round_result_round_trips_review_feedback() -> None:
 
     assert decoded == result
     assert isinstance(decoded.review_feedback[0], ReviewFeedback)
+
+
+def test_agent_result_and_round_event_round_trip_review_feedback() -> None:
+    feedback = ReviewFeedback(
+        issue="unsupported_claim",
+        target_agent="analyst",
+        target_artifact_id="claim_001",
+        message="Claim is unsupported.",
+        required_action="Revise the claim.",
+    )
+    agent_result = AgentResult(
+        agent="reviewer",
+        decision="rework",
+        rounds=1,
+        review_feedback=[feedback],
+    )
+    round_event = RoundEvent(
+        id="event_001",
+        run_id="run_001",
+        agent="reviewer",
+        round=1,
+        decision="rework",
+        review_feedback=[feedback],
+    )
+
+    decoded_result = AgentResult.from_dict(
+        json.loads(json.dumps(agent_result.to_dict()))
+    )
+    decoded_event = RoundEvent.from_dict(json.loads(json.dumps(round_event.to_dict())))
+
+    assert decoded_result == agent_result
+    assert decoded_event == round_event
+    assert isinstance(decoded_result.review_feedback[0], ReviewFeedback)
+    assert isinstance(decoded_event.review_feedback[0], ReviewFeedback)

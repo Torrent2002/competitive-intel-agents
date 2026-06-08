@@ -18,6 +18,7 @@ In scope:
 - Passing run context into tool execution so per-run permissions are enforced.
 - Preserving tool-call provenance in journal events.
 - Passing prior tool results into the next round through `AgentState.memory`.
+- Propagating reviewer feedback through `RoundEvent` and `AgentResult`.
 
 Out of scope:
 
@@ -59,22 +60,24 @@ local runs. Production recovery is intentionally out of scope.
 | Condition | Decision |
 |---|---|
 | Agent returns completed result | `stop` |
+| Reviewer returns fixable feedback | `rework` |
 | Round budget exceeded | `abort` |
 | Identical tool call repeats 3 times | `abort` |
 | Transient tool or model error | `retry` |
-| Reviewer returns fixable feedback | `rework` |
 | New artifact or progress signal appears | `continue` |
 
 Decision precedence:
 
 1. `completed=True` returns `stop`.
-2. Repeated identical tool call at the configured limit returns `abort`.
-3. Tool/runtime errors return `retry`.
-4. Final budget round with no terminal condition returns `abort`.
-5. Otherwise return `continue`.
+2. `rework_required` signal returns `rework`.
+3. Repeated identical tool call at the configured limit returns `abort`.
+4. Tool/runtime errors return `retry`.
+5. Final budget round with no terminal condition returns `abort`.
+6. Otherwise return `continue`.
 
-`run_agent()` loops from round `1` through `AgentProfile.max_rounds`. If no
-profile exists for the agent, the fallback budget is one round.
+`run_agent()` loops from round `1` through `AgentProfile.max_rounds`. It returns
+as soon as a round decision is `stop`, `rework`, or `abort`. If no profile exists
+for the agent, the fallback budget is one round.
 
 ## Permission and Provenance Rules
 
@@ -107,6 +110,7 @@ profile exists for the agent, the fallback budget is one round.
 
 - Each round appends exactly one `RoundEvent`.
 - v0 event ids are deterministic: `{run_id}:{agent}:{round_index}`.
+- Reviewer feedback is copied into `RoundEvent.review_feedback` so journal replay can explain why a run needs rework.
 - A checkpoint is saved after each round when a checkpoint store is configured.
 - v0 checkpoint state records the round index and agent signals only. Full state recovery is a later module.
 
@@ -122,6 +126,8 @@ profile exists for the agent, the fallback budget is one round.
 - Keeps repeated-call counts isolated by run id.
 - Passes `RunContext` to tool execution so `AgentProfile.allowed_tools` is honored.
 - Passes tool results to the next round through `AgentState.memory`.
+- Returns `rework` immediately when reviewer feedback is fixable.
+- Propagates reviewer feedback into `AgentResult` and `RoundEvent`.
 - Journals failed tool results caused by permission or provenance errors.
 - Does not overwrite artifacts during rework.
 

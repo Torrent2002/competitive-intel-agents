@@ -59,12 +59,13 @@ Harness 每轮产出一个 `HarnessDecision`：
 | 条件 | 决策 |
 |---|---|
 | Agent 返回 `completed=True` | `stop` |
+| Reviewer 返回 `rework_required` | `rework` |
 | 同一个 tool signature 到达 3 次 | `abort` |
 | 工具执行失败或权限失败 | `retry` |
 | 已经是最后一个 budget round | `abort` |
 | 其他正常进展 | `continue` |
 
-优先级很重要：如果 agent 已经完成，就直接 `stop`；如果没完成但一直重复同一个 tool call，就先 `abort`，避免预算被无意义消耗。
+优先级很重要：如果 agent 已经完成，就直接 `stop`；如果 Reviewer 给出可修复反馈，就返回 `rework`，交给 Orchestrator/Rework Loop 处理；如果没完成但一直重复同一个 tool call，就 `abort`，避免预算被无意义消耗。
 
 重复调用计数按 `run_id + agent + tool name + signature` 隔离。这样同一个 `RuntimeHarness` 实例连续跑多个 run 时，前一个 run 的失败模式不会污染后一个 run。
 
@@ -92,6 +93,17 @@ tool_error:<tool_call_id>
 ```
 
 等后面需要更完整的 observability，可以扩展 core model，把 `ToolResult` 也写进 `RoundEvent`。
+
+Reviewer feedback 是例外，它已经是 workflow control 的一部分，所以会写入：
+
+```text
+AgentRoundResult.review_feedback
+  -> RoundEvent.review_feedback
+  -> AgentResult.review_feedback
+  -> RunResult.review_feedback
+```
+
+这样 Orchestrator 可以直接判断 `approved / needs_rework / aborted`，不需要重新跑 Reviewer，也不需要解析自然语言。
 
 ---
 
@@ -162,6 +174,7 @@ test_run_round_passes_context_to_tool_runtime_permissions
 test_run_round_rejects_tool_call_requested_by_another_agent
 test_run_round_appends_one_journal_event_and_checkpoint
 test_run_agent_passes_tool_results_to_next_round_memory
+test_run_agent_returns_rework_decision_with_review_feedback
 ```
 
 这些测试覆盖了 v0 harness 最关键的不变量：终止规则、预算、重复工具熔断、权限传递、provenance 校验、journal 和 checkpoint。

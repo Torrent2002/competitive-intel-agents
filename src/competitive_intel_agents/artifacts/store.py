@@ -34,14 +34,21 @@ class ArtifactStore(Protocol):
     def save_source(self, artifact: SourceArtifact) -> None:
         ...
 
-    def list_sources(self, run_id: str) -> list[SourceArtifact]:
+    def list_sources(
+        self, run_id: str, status: ArtifactStatus | None = "active"
+    ) -> list[SourceArtifact]:
+        ...
+
+    def get_artifact(
+        self, artifact_id: str
+    ) -> SourceArtifact | AnalysisClaim | ReportDraft:
         ...
 
     def save_claim(self, claim: AnalysisClaim) -> None:
         ...
 
     def list_claims(
-        self, run_id: str, status: ArtifactStatus = "active"
+        self, run_id: str, status: ArtifactStatus | None = "active"
     ) -> list[AnalysisClaim]:
         ...
 
@@ -49,6 +56,11 @@ class ArtifactStore(Protocol):
         ...
 
     def get_latest_report(self, run_id: str) -> ReportDraft | None:
+        ...
+
+    def list_reports(
+        self, run_id: str, status: ArtifactStatus | None = "active"
+    ) -> list[ReportDraft]:
         ...
 
     def mark_superseded(self, artifact_id: str, replacement_id: str) -> None:
@@ -141,15 +153,23 @@ class InMemoryArtifactStore:
         self._statuses[artifact.id] = artifact.status
         self._record(artifact.run_id, artifact.id, "source")
 
-    def list_sources(self, run_id: str) -> list[SourceArtifact]:
+    def list_sources(
+        self, run_id: str, status: ArtifactStatus | None = "active"
+    ) -> list[SourceArtifact]:
         if run_id not in self._run_order:
             return []
         return [
             self._with_current_status(self._sources[aid])
             for aid, atype in self._run_order[run_id]
             if atype == "source" and aid in self._sources
-            and self._statuses.get(aid, "active") == "active"
+            and (status is None or self._statuses.get(aid, "active") == status)
         ]
+
+    def get_artifact(
+        self, artifact_id: str
+    ) -> SourceArtifact | AnalysisClaim | ReportDraft:
+        artifact, _ = self._get_artifact(artifact_id)
+        return self._with_current_status(artifact)
 
     # --- claims ---
 
@@ -160,7 +180,7 @@ class InMemoryArtifactStore:
         self._record(claim.run_id, claim.id, "claim")
 
     def list_claims(
-        self, run_id: str, status: ArtifactStatus = "active"
+        self, run_id: str, status: ArtifactStatus | None = "active"
     ) -> list[AnalysisClaim]:
         if run_id not in self._run_order:
             return []
@@ -168,7 +188,7 @@ class InMemoryArtifactStore:
             self._with_current_status(self._claims[aid])
             for aid, atype in self._run_order[run_id]
             if atype == "claim" and aid in self._claims
-            and self._statuses.get(aid, "active") == status
+            and (status is None or self._statuses.get(aid, "active") == status)
         ]
 
     # --- reports ---
@@ -180,17 +200,22 @@ class InMemoryArtifactStore:
         self._record(report.run_id, report.id, "report")
 
     def get_latest_report(self, run_id: str) -> ReportDraft | None:
-        if run_id not in self._run_order:
-            return None
-        reports = [
-            self._with_current_status(self._reports[aid])
-            for aid, atype in self._run_order[run_id]
-            if atype == "report" and aid in self._reports
-            and self._statuses.get(aid, "active") == "active"
-        ]
+        reports = self.list_reports(run_id)
         if not reports:
             return None
         return max(reports, key=lambda r: r.version)
+
+    def list_reports(
+        self, run_id: str, status: ArtifactStatus | None = "active"
+    ) -> list[ReportDraft]:
+        if run_id not in self._run_order:
+            return []
+        return [
+            self._with_current_status(self._reports[aid])
+            for aid, atype in self._run_order[run_id]
+            if atype == "report" and aid in self._reports
+            and (status is None or self._statuses.get(aid, "active") == status)
+        ]
 
     # --- status mutations ---
 
@@ -360,8 +385,16 @@ class SQLiteArtifactStore:
     def save_source(self, artifact: SourceArtifact) -> None:
         self._insert_artifact(artifact, "source")
 
-    def list_sources(self, run_id: str) -> list[SourceArtifact]:
-        return self._list_by_type(run_id, "source", SourceArtifact, "active")
+    def list_sources(
+        self, run_id: str, status: ArtifactStatus | None = "active"
+    ) -> list[SourceArtifact]:
+        return self._list_by_type(run_id, "source", SourceArtifact, status)
+
+    def get_artifact(
+        self, artifact_id: str
+    ) -> SourceArtifact | AnalysisClaim | ReportDraft:
+        artifact, _ = self._get_artifact(artifact_id)
+        return artifact
 
     # --- claims ---
 
@@ -369,7 +402,7 @@ class SQLiteArtifactStore:
         self._insert_artifact(claim, "claim")
 
     def list_claims(
-        self, run_id: str, status: ArtifactStatus = "active"
+        self, run_id: str, status: ArtifactStatus | None = "active"
     ) -> list[AnalysisClaim]:
         return self._list_by_type(run_id, "claim", AnalysisClaim, status)
 
@@ -379,18 +412,15 @@ class SQLiteArtifactStore:
         self._insert_artifact(report, "report")
 
     def get_latest_report(self, run_id: str) -> ReportDraft | None:
-        rows = self._connection.execute(
-            """
-            SELECT payload, status FROM artifacts
-            WHERE run_id = ? AND type = 'report' AND status = 'active'
-            ORDER BY version DESC
-            LIMIT 1
-            """,
-            (run_id,),
-        ).fetchall()
-        if not rows:
+        reports = self.list_reports(run_id)
+        if not reports:
             return None
-        return replace(ReportDraft.from_dict(json.loads(rows[0][0])), status=rows[0][1])
+        return max(reports, key=lambda r: r.version)
+
+    def list_reports(
+        self, run_id: str, status: ArtifactStatus | None = "active"
+    ) -> list[ReportDraft]:
+        return self._list_by_type(run_id, "report", ReportDraft, status)
 
     # --- status mutations ---
 
