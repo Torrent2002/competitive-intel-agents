@@ -1,0 +1,6 @@
+{
+  "company": "Slack",
+  "market": "team communication",
+  "competitors": ["Microsoft Teams"],
+  "questions": ["enterprise features", "security"]
+}

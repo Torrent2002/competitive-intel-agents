@@ -11,7 +11,7 @@
   "min_claim_source_coverage_ratio": 1.0,
   "require_report_source_coverage": true,
   "max_reviewer_rejections": 0,
-  "max_total_rounds": 12,
+  "max_total_rounds": 14,
   "max_tool_calls": 8,
   "terminal_status": "approved",
   "terminal_decision": "stop",

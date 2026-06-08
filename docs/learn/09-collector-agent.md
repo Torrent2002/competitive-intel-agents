@@ -1,143 +1,113 @@
-# 09 Collector Agent — 面试级学习笔记
+# 09 Collector Agent — 面试级学习笔记（v2）
 
 ## 一句话概括
 
-**Collector Agent 是 pipeline 里负责收集证据的 agent：它提出搜索/抓取工具请求，并把抓取结果保存成结构化 `SourceArtifact`。**
+**Collector 是 pipeline 的信息入口：多角度搜索 → 域名去重 → 模型相关性过滤 → 结构化 source。模型驱动模式下，不是"搜一个词拿两条结果就停"，而是多轮迭代直到收集够高质量来源。**
 
 ---
 
-## 1. 它为什么重要？
+## 1. v1 → v2 的演进
 
-多 agent 竞品分析里，后面的 Analyst、Writer、Reviewer 都依赖 Collector 的证据质量。
+| | v1（fake pipeline） | v2（model-backed） |
+|---|---|---|
+| 搜索查询数 | 1 个 | 3-5 个（产品/定价/竞品/技术/新闻） |
+| 目标来源数 | 2 | 5 |
+| URL 选择 | 直接取前几个 | 优先不同域名，再补同域其他页 |
+| 内容过滤 | 抓到什么存什么 | 模型判断相关性，不相关直接跳过 |
+| 内容提取 | 原始 title/snippet | 模型提取结构化标题+事实摘要 |
+| 不足时 | 直接结束 | 模型生成细化查询，继续搜 |
 
-如果 Collector 只是把网页内容塞进自然语言 prompt，后面会遇到几个问题：
+---
 
-- Analyst 不知道每个结论对应哪个 URL
-- Writer 容易绕过证据直接写结论
-- Reviewer 无法定位 unsupported claim
-- Rework 时没法精确要求“补充哪个 source”
+## 2. Round Flow v2
 
-所以 Collector 的产出不是一段文字，而是 `SourceArtifact`：
-
-```python
-SourceArtifact(
-    id="source_run_001_001",
-    run_id="run_001",
-    url="https://example.com/a",
-    title="Page A",
-    snippet="A detailed page about ACME.",
-)
+```
+Round 1: 模型生成 3-5 个多角度查询 → 批量 web_search x5
+Round 2: 收到搜索结果 → 域名去重选 5-8 个 URL → 批量 web_fetch x5
+Round 3: 收到抓取结果 → 模型相关性过滤 → 模型提取 title+摘要 → 保存
+Round 4+: 不够 5 个 → 模型生成细化查询 → 重复搜索/抓取
 ```
 
----
-
-## 2. 职责边界
-
-Collector 做三件事：
-
-1. 根据 `CompetitiveIntelRequest` 生成搜索 query。
-2. 根据上一轮 `ToolResult` 请求下一步工具，或者保存 source。
-3. 去重 URL，避免重复 source artifact。
-
-Collector 不做这些事：
-
-- 不直接执行工具。
-- 不调用模型。
-- 不产出 `AnalysisClaim`。
-- 不写 journal。
-- 不决定全局流程。
-
-这些职责分别属于 ToolRuntime、ModelRuntime、Analyst、JournalStore 和 RuntimeHarness。
+核心设计：**Collector 不依赖 ToolRuntime，只通过 ToolCall/ToolResult 通信**。
 
 ---
 
-## 3. Round Flow
+## 3. 为什么多查询很重要
 
-v0 的 Collector 是一个简单状态机，状态来自 `AgentState.memory["tool_results"]`：
+单查询"小米 荣耀 2026Q1 手机"容易出现：
 
-```text
-Round 1: no tool_results
-  -> request web_search(query)
+- 前 5 条全是同一事件的转载（搜狐、企鹅号、头条号）
+- 没有竞品视角（荣耀的市场份额数据）
+- 没有产品细节（具体型号、定价）
 
-Round 2: has web_search results
-  -> dedupe URLs
-  -> request web_fetch(url) for each new URL
+多查询策略：每个角度一条 query，模型生成如：
 
-Round 3: has web_fetch results
-  -> save SourceArtifact records
-  -> completed=True if target source count reached
+```
+"小米 2026Q1 智能手机出货量"
+"荣耀 Honor 2026Q1 市场份额"
+"小米 vs 荣耀 2026 产品对比"
+"小米 2026Q1 财报 手机业务"
 ```
 
-这个设计的关键是：**Collector 不依赖 ToolRuntime，ToolRuntime 不依赖 Collector**。两者只通过 `ToolCall` 和 `ToolResult` 这两个 core models 通信。
+这样 Analyst 拿到的是多角度、不同信源的素材，分析质量才有保证。
 
 ---
 
-## 4. Query 生成
+## 4. 相关性过滤
 
-Collector 用输入里的所有高价值 hint 组成 query：
+搜"阿里 Qoder"，抓取回来的可能是：
 
-```python
-parts = [
-    request.company,
-    request.market,
-    *request.competitors,
-    *request.questions,
-]
-query = " ".join(part for part in parts if part)
+- ✅ Qoder 产品页面（相关）
+- ✅ Qoder 技术架构分析（相关）
+- ❌ 阿里巴巴 IR 投资者关系页面（无关）
+- ❌ 阿里云通用产品目录（弱相关）
+
+模型做快速二分类：`{"relevant": true/false}`。无关页面直接跳过，不浪费 Analyst 的 token 和用户的时间。
+
+---
+
+## 5. 内容提取
+
+原始 HTML 可能有 2000+ 字，包含导航栏、广告、相关文章链接。模型从中提取：
+
+```json
+{
+  "title": "Qoder: Alibaba's AI Coding Assistant Challenges Cursor",
+  "summary": "Alibaba launched Qoder, an AI IDE with three modes (Ask, Agent, Quest). Built on Qwen Coder model with MoE architecture. Currently free, aims to compete with Cursor and Windsurf."
+}
 ```
 
-这样用户给的 market、competitors、questions 不会被浪费。后续可以把 query generation 换成 model-based planner，但 v0 保持 deterministic，方便测试和面试演示。
+而不是把整个 HTML dump 进 SourceArtifact。
 
 ---
 
-## 5. Deduplication
+## 6. 诊断输出
 
-Collector 有两层去重：
+stderr 实时反馈采集进度：
 
-- 同一批 search results 里重复 URL，只生成一个 `web_fetch`。
-- 已经保存过的 source URL，不再保存第二次。
-
-这和 ArtifactStore 的 immutable id 规则配合：rework 可以新增 source，但不能覆盖旧 source。
-
----
-
-## 6. 和 Harness 的关系
-
-Collector 通过 harness 跑起来：
-
-```python
-store = InMemoryArtifactStore()
-collector = CollectorAgent(store)
-harness.run_agent(context, collector)
+```
+[collector] saved 4 sources, total=4 (target=5)
+[collector] skipping irrelevant: https://ir.alibaba.com/financial-reports
 ```
 
-Harness 负责：
-
-- round budget
-- tool execution
-- tool result memory
-- repeated tool circuit breaker
-- journal event
-- checkpoint
-
-Collector 负责：
-
-- 读 memory 里的 tool results
-- 返回下一步 tool calls
-- 保存 source artifacts
-
-这个分工让 Collector 很容易单测，也让后续 Analyst/Writer 可以复用同样的 agent pattern。
+面试时可以讲：**"我们不是在黑箱里跑 agent，collector 的每一步决策都有 stderr 输出可审计。"**
 
 ---
 
 ## 7. 测试覆盖
 
 ```text
-test_collector_first_round_requests_search_query_from_run_input
+test_collector_first_round_requests_search_query_from_run_input  → ≥1 个查询
 test_collector_turns_search_results_into_deduped_fetch_calls
 test_collector_saves_fetch_results_as_source_artifacts
 test_collector_skips_urls_already_saved
-test_collector_can_run_through_harness_with_fake_tools
+test_collector_can_run_through_harness_with_fake_tools             → 不依赖真实网络
 ```
 
-这些测试覆盖了 Collector 的关键不变量：query 输入完整、工具请求正确、URL 去重、source artifact 持久化、能通过 harness 端到端跑起来。
+fake 模式保持 2 source 目标，model-backed 模式 5 个目标。Orchestrator 根据 `model_runtime` 是否存在自动选择。
+
+---
+
+## 面试怎么讲
+
+> Collector 不是"搜一下关键词 dump 结果"。它是多角度的信息采集器：模型生成 3-5 个不同角度的查询，按域名去重抓取，每条内容先做相关性判断再提取结构化摘要。不够的时候会自动细化查询继续采集。整个过程有 stderr 实时输出可审计。这就是为什么 analyst 拿到的不再是一堆噪音 URL，而是真正相关的信息。

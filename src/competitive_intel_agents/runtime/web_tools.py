@@ -5,10 +5,25 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import os
 import re
 from pathlib import Path
 from typing import Callable, Protocol
 from urllib import parse, request as urllib_request
+
+
+def _ensure_ssl_certs() -> None:
+    """Auto-detect SSL cert file for Homebrew Python on macOS."""
+    if os.environ.get("SSL_CERT_FILE"):
+        return
+    for cert_path in (
+        "/etc/ssl/cert.pem",
+        "/opt/homebrew/etc/openssl@3/cert.pem",
+        "/usr/local/etc/openssl@3/cert.pem",
+    ):
+        if Path(cert_path).exists():
+            os.environ["SSL_CERT_FILE"] = cert_path
+            return
 
 
 class SearchAdapter(Protocol):
@@ -23,6 +38,7 @@ class HttpClient:
         self._opener = opener or urllib_request.urlopen
 
     def get_text(self, url: str, timeout: float = 10.0) -> str:
+        _ensure_ssl_certs()
         req = urllib_request.Request(
             url,
             headers={
@@ -51,11 +67,43 @@ class DuckDuckGoSearch:
 
     def search(self, query: str, limit: int = 5) -> list[dict]:
         encoded = parse.quote_plus(query)
-        html_text = self._http_client.get_text(
-            f"https://duckduckgo.com/html/?q={encoded}",
-            timeout=self._timeout,
-        )
-        return _parse_duckduckgo_html(html_text, limit)
+        results: list[dict] = []
+        last_error = ""
+        # Try primary HTML endpoint first
+        try:
+            html_text = self._http_client.get_text(
+                f"https://html.duckduckgo.com/html/?q={encoded}",
+                timeout=self._timeout,
+            )
+            results = _parse_duckduckgo_html(html_text, limit)
+            if not results:
+                last_error = f"html:0_results(len={len(html_text)})"
+        except Exception as exc:
+            last_error = f"html:{exc}"
+        # Fallback to lite version
+        if not results:
+            try:
+                html_text = self._http_client.get_text(
+                    f"https://lite.duckduckgo.com/lite/?q={encoded}",
+                    timeout=self._timeout,
+                )
+                results = _parse_duckduckgo_lite(html_text, limit)
+                if not results:
+                    last_error += f" lite:0_results(len={len(html_text)})"
+            except Exception as exc:
+                last_error += f" lite:{exc}"
+        if not results:
+            import sys
+            print(
+                f"[ddg] query={query[:50]!r} results=0 error={last_error}",
+                file=sys.stderr,
+            )
+            # Dump first bit of HTML to diagnose parsing failures
+            try:
+                print(f"[ddg] html preview: {html_text[:300]!r}", file=sys.stderr)
+            except Exception:
+                pass
+        return results
 
 
 class WebSearchTool:
@@ -133,35 +181,68 @@ class CachedWebFetch:
         return payload
 
 
-def _parse_duckduckgo_html(html_text: str, limit: int) -> list[dict]:
+def _parse_duckduckgo_lite(html_text: str, limit: int) -> list[dict]:
+    """Parse DuckDuckGo Lite / HTML results with flexible link extraction."""
     results: list[dict] = []
-    pattern = re.compile(
-        r'<a[^>]+class="result__a"[^>]+href="(?P<href>[^"]+)"[^>]*>(?P<title>.*?)</a>',
-        re.DOTALL,
-    )
-    snippets = [
-        _strip_tags(match)
-        for match in re.findall(
-            r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>',
-            html_text,
-            flags=re.DOTALL,
-        )
-    ]
-    for index, match in enumerate(pattern.finditer(html_text)):
+
+    # Find all external links with display text
+    # Lite format: <a href="..." class="result-link">Title</a> near <span class="result-snippet">
+    # HTML format: <a rel="nofollow" href="//duckduckgo.com/l/?uddg=...">Title</a>
+    link_matches = list(re.finditer(
+        r'<a\b[^>]*href="(?P<href>[^"]+)"[^>]*>(?P<title>.*?)</a>',
+        html_text,
+        re.DOTALL | re.IGNORECASE,
+    ))
+
+    # Extract all possible snippet texts
+    snippet_matches = []
+    for pattern in [
+        r'<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>',
+        r'<span[^>]*class="[^"]*result-snippet[^"]*"[^>]*>(.*?)</span>',
+        r'<span[^>]*class="[^"]*snippet[^"]*"[^>]*>(.*?)</span>',
+        r'<td[^>]*class="[^"]*snippet[^"]*"[^>]*>(.*?)</td>',
+        r'<div[^>]*class="[^"]*snippet[^"]*"[^>]*>(.*?)</div>',
+    ]:
+        snippet_matches = re.findall(pattern, html_text, re.DOTALL | re.IGNORECASE)
+        if snippet_matches:
+            break
+
+    snippet_idx = 0
+    seen_urls: set[str] = set()
+    for match in link_matches:
         href = html.unescape(match.group("href"))
-        url = _normalize_duckduckgo_url(href)
-        if not url:
+        title_raw = match.group("title")
+        title = _strip_tags(title_raw).strip()
+
+        # Skip non-result links (navigation, internal)
+        if not title or len(title) < 3:
             continue
-        results.append(
-            {
-                "title": _strip_tags(match.group("title")),
-                "url": url,
-                "snippet": snippets[index] if index < len(snippets) else "",
-            }
-        )
+        if any(skip in href.lower() for skip in ("duckduckgo.com/settings", "duckduckgo.com/about",
+                                                    "duckduckgo.com/privacy", "/html/", "/lite/",
+                                                    "duckduckgo.com/newsletter")):
+            continue
+
+        url = _normalize_duckduckgo_url(href)
+        if not url or "duckduckgo.com" in url:
+            continue
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+
+        snippet = ""
+        if snippet_idx < len(snippet_matches):
+            snippet = _strip_tags(snippet_matches[snippet_idx]).strip()
+            snippet_idx += 1
+
+        results.append({"title": title, "url": url, "snippet": snippet})
         if len(results) >= limit:
             break
     return results
+
+
+def _parse_duckduckgo_html(html_text: str, limit: int) -> list[dict]:
+    """Fallback HTML parser — delegates to lite parser which handles both formats."""
+    return _parse_duckduckgo_lite(html_text, limit)
 
 
 def _normalize_duckduckgo_url(href: str) -> str:

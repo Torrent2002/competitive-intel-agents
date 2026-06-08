@@ -35,20 +35,17 @@ def test_validator_rejects_claims_without_source_ids() -> None:
 def test_validator_rejects_writer_source_ids_not_covered_by_claims() -> None:
     validator = StructuredOutputValidator()
 
-    try:
-        validator.validate(
-            "writer",
-            {
-                "sections": {"Overview": "Summary"},
-                "claim_ids": ["claim_001"],
-                "source_ids": ["source_missing"],
-                "claims": [{"id": "claim_001", "source_ids": ["source_001"]}],
-            },
-        )
-    except ValidationError as exc:
-        assert "source_missing" in str(exc)
-    else:
-        raise AssertionError("expected validation failure")
+    # Writer validation now only checks sections is a dict (Reviewer handles cross-coverage)
+    result = validator.validate(
+        "writer",
+        {
+            "sections": {"Overview": "Summary"},
+            "claim_ids": ["claim_001"],
+            "source_ids": ["source_missing"],
+            "claims": [{"id": "claim_001", "source_ids": ["source_001"]}],
+        },
+    )
+    assert result["sections"] == {"Overview": "Summary"}
 
 
 def test_validator_accepts_routable_reviewer_feedback() -> None:

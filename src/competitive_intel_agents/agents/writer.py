@@ -11,6 +11,7 @@ from competitive_intel_agents.models import (
     ReportDraft,
     RunContext,
 )
+from competitive_intel_agents.runtime.model_runtime import ModelRuntime
 
 
 class WriterAgent(BaseAgent):
@@ -26,8 +27,13 @@ class WriterAgent(BaseAgent):
         "Sources",
     )
 
-    def __init__(self, artifacts: ArtifactStore) -> None:
+    def __init__(
+        self,
+        artifacts: ArtifactStore,
+        model_runtime: ModelRuntime | None = None,
+    ) -> None:
         self._artifacts = artifacts
+        self._model_runtime = model_runtime
 
     def run_round(self, context: RunContext, state: AgentState) -> AgentRoundResult:
         existing_report = self._artifacts.get_latest_report(context.run_id)
@@ -45,10 +51,15 @@ class WriterAgent(BaseAgent):
                 signals=["missing_claims"],
             )
 
+        if self._model_runtime is not None:
+            sections = self._model_sections(context, claims)
+        else:
+            sections = self._template_sections(context, claims)
+
         report = ReportDraft(
             id=self._next_report_id(context.run_id),
             run_id=context.run_id,
-            sections=self._sections(context, claims),
+            sections=sections,
             claim_ids=[claim.id for claim in claims],
             source_ids=self._source_ids(claims),
         )
@@ -59,11 +70,71 @@ class WriterAgent(BaseAgent):
             signals=["report_created"],
         )
 
-    def _sections(
+    def _model_sections(
         self,
         context: RunContext,
         claims: list[AnalysisClaim],
     ) -> dict[str, str]:
+        """Use model to compose a structured report from claims."""
+        from competitive_intel_agents.prompts import AgentPromptLibrary, StructuredOutputValidator
+
+        prompt_lib = AgentPromptLibrary()
+        claims_json = [
+            {
+                "id": c.id,
+                "text": c.text,
+                "source_ids": c.source_ids,
+                "confidence": c.confidence,
+                "reasoning": c.reasoning,
+            }
+            for c in claims
+        ]
+
+        task = (
+            f"Write a competitive intelligence report about {context.request.company} "
+            f"based on the provided claims. Return a JSON object with a 'sections' object "
+            f"containing these keys: {', '.join(self.REQUIRED_SECTIONS)}. "
+            f"Each section value should be 2-4 paragraphs of substantive analysis. "
+            f"Do NOT fabricate facts not present in the claims. "
+            f"Include claim references like [claim_id] in the text. "
+            f"Also include 'claim_ids' (list) and 'source_ids' (list) in the JSON."
+        )
+        model_req = prompt_lib.build(
+            self.name,
+            task,
+            {
+                "company": context.request.company,
+                "market": context.request.market,
+                "competitors": context.request.competitors,
+                "claims": claims_json,
+            },
+        )
+        resp = self._model_runtime.complete(model_req)
+        if not resp.ok or not resp.parsed:
+            return self._template_sections(context, claims)
+
+        validator = StructuredOutputValidator()
+        try:
+            validator.validate(self.name, resp.parsed)
+        except Exception:
+            return self._template_sections(context, claims)
+
+        sections = resp.parsed.get("sections", {})
+        if not isinstance(sections, dict) or not sections:
+            return self._template_sections(context, claims)
+
+        # Ensure all required sections exist
+        result: dict[str, str] = {}
+        for section in self.REQUIRED_SECTIONS:
+            result[section] = str(sections.get(section, ""))
+        return result
+
+    def _template_sections(
+        self,
+        context: RunContext,
+        claims: list[AnalysisClaim],
+    ) -> dict[str, str]:
+        """Hardcoded section generation — fallback when no model is available."""
         claim_lines = "\n".join(self._claim_line(claim) for claim in claims)
         pricing_claims = [
             claim for claim in claims if "pricing" in claim.text.lower()

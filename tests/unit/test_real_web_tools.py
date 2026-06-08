@@ -44,7 +44,7 @@ def test_duckduckgo_search_parses_html_results_without_network() -> None:
       <a class="result__a" href="https://example.com/b">Result B</a>
     </html>
     """
-    client = StubHttpClient({"https://duckduckgo.com/html/?q=Notion+pricing": html})
+    client = StubHttpClient({"https://html.duckduckgo.com/html/?q=Notion+pricing": html})
     search = DuckDuckGoSearch(http_client=client)
 
     results = search.search("Notion pricing", limit=2)

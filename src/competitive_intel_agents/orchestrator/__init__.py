@@ -25,6 +25,7 @@ from competitive_intel_agents.models import (
 )
 from competitive_intel_agents.rework import ReworkLoop
 from competitive_intel_agents.runtime import FakeWebFetch, FakeWebSearch, ToolRuntime
+from competitive_intel_agents.runtime.model_runtime import ModelRuntime
 
 
 class Harness(Protocol):
@@ -51,6 +52,7 @@ class Orchestrator:
         run_id_factory: Callable[[], str] | None = None,
         enable_rework: bool = False,
         max_rework_attempts: int = 2,
+        model_runtime: ModelRuntime | None = None,
     ) -> None:
         self.artifacts = artifacts or InMemoryArtifactStore()
         self.journal = journal or InMemoryJournalStore()
@@ -59,6 +61,7 @@ class Orchestrator:
         self._run_id_factory = run_id_factory or _default_run_id
         self._enable_rework = enable_rework
         self._max_rework_attempts = max_rework_attempts
+        self._model_runtime = model_runtime
         self.last_context: RunContext | None = None
 
     def run(self, request: CompetitiveIntelRequest) -> RunResult:
@@ -145,11 +148,13 @@ class Orchestrator:
         )
 
     def _build_agents(self) -> list[Agent]:
+        mr = self._model_runtime
+        target_sources = 5 if mr is not None else 2
         return [
-            CollectorAgent(self.artifacts),
-            AnalystAgent(self.artifacts),
-            WriterAgent(self.artifacts),
-            ReviewerAgent(self.artifacts),
+            CollectorAgent(self.artifacts, target_sources=target_sources, model_runtime=mr),
+            AnalystAgent(self.artifacts, model_runtime=mr),
+            WriterAgent(self.artifacts, model_runtime=mr),
+            ReviewerAgent(self.artifacts, model_runtime=mr),
         ]
 
     def _latest_report_id(self, run_id: str) -> str | None:

@@ -244,25 +244,37 @@ Per-run dashboard (terminal or basic web):
 
 ---
 
-## Project Structure (Planned)
+## Project Structure
 
 ```
 competitive-intel-agents/
-├── src/
+├── src/competitive_intel_agents/
 │   ├── agents/           # Collector, Analyst, Writer, Reviewer
-│   ├── orchestrator/     # Task decomposition, DAG, agent profiles
-│   ├── runtime/          # Model/tool execution
-│   ├── journal/          # Decision record, provenance chain
-│   ├── harness/          # RuntimeHarness, signals, budgets, checkpoint
-│   ├── cli/              # Command-line entrypoint
-│   └── dashboard/        # Observability UI
+│   ├── artifacts/        # Artifact store (in-memory and SQLite)
+│   ├── cli/              # CLI (run/chat/dashboard/export/web/golden/runs)
+│   ├── dashboard/        # Terminal dashboard snapshot
+│   ├── export/           # Report export (markdown, JSON, HTML)
+│   ├── golden/           # Golden replay runner and metrics
+│   ├── harness/          # RuntimeHarness, checkpoint, stall detection
+│   ├── journal/          # Journal store (in-memory and SQLite)
+│   ├── orchestrator/     # Pipeline orchestrator and agent DAG
+│   ├── prompts/          # Structured agent prompts
+│   ├── provenance/       # Causal provenance graph
+│   ├── rework/           # Bounded rework loop
+│   ├── runtime/          # Model/tool runtime and web tools
+│   ├── web/              # Web dashboard (stdlib http.server)
+│   ├── workspace/        # Persistent local workspace
+│   └── models.py         # Shared data contracts
 ├── tests/
-│   ├── golden/           # Golden case regression suite
-│   ├── fixtures/         # Fake requests and expected shapes
-│   └── unit/             # Per-component tests
+│   ├── golden/           # 5 golden cases for CI regression
+│   ├── fixtures/         # Fake requests
+│   └── unit/             # 25+ unit test files
 ├── docs/
-│   ├── SPEC_CODING_PLAN.md
-│   └── modules/          # Small module specs for incremental development
+│   ├── learn/            # Chinese learning docs (00-30)
+│   ├── modules/          # Module specs (01-30)
+│   └── troubleshooting.md
+├── scripts/
+│   └── demo.sh           # End-to-end demo
 ├── config/
 │   └── agent_profiles.yaml
 └── README.md
@@ -314,6 +326,37 @@ PYTHONPATH=src python -m competitive_intel_agents.cli dashboard \
   --workspace .competitive-intel
 ```
 
+Export a completed run:
+
+```bash
+PYTHONPATH=src python -m competitive_intel_agents.cli export \
+  --run-id <run_id> \
+  --format markdown|json|html \
+  --workspace .competitive-intel \
+  --output report.md
+```
+
+Run the golden regression suite:
+
+```bash
+PYTHONPATH=src python -m competitive_intel_agents.cli golden \
+  --root tests/golden
+```
+
+Start a local web dashboard:
+
+```bash
+PYTHONPATH=src python -m competitive_intel_agents.cli web \
+  --workspace .competitive-intel \
+  --port 8080
+```
+
+Run the full demo script:
+
+```bash
+bash scripts/demo.sh
+```
+
 If editable install fails because of a system Python or certificate issue, the
 `PYTHONPATH=src python -m ...` form is the supported fallback.
 
@@ -329,15 +372,43 @@ export CIA_MODEL_NAME=your_model_name
 
 ---
 
+## Quickstart
+
+```bash
+# Clone and enter the project
+git clone https://github.com/Torrent2002/competitive-intel-agents.git
+cd competitive-intel-agents
+
+# Option A: Venv + editable install
+python3 -m venv .venv && source .venv/bin/activate && pip install -e .
+
+# Option B: PYTHONPATH (no install)
+export PYTHONPATH=src
+
+# Run the demo
+bash scripts/demo.sh
+
+# Or run individual commands
+competitive-intel run --input tests/fixtures/request.json --show-dashboard
+competitive-intel chat
+competitive-intel web --port 8080
+```
+
+See [troubleshooting](docs/troubleshooting.md) for common issues.
+
+---
+
 ## Project Status
 
-**Phase 1 (current)**: Role-bounded artifact pipeline — source collection, sourced claims, structured draft, reviewer gate, round journaling, budget checks, repeated-tool circuit breaker.
+**V1 (current)**: Full pipeline with role-bounded agents, CLI suite (run/chat/dashboard/export/web/golden), persistence, provenance, golden replay CI, and web dashboard.
 
-**Phase 2**: Reliability layer — stronger stall detection, checkpoint recovery per agent, retry policies.
+**Phase 1**: Role-bounded artifact pipeline — source collection, sourced claims, structured draft, reviewer gate, round journaling, budget checks, repeated-tool circuit breaker.
 
-**Phase 3**: Provenance — full causal chain, audit trail, claim-to-source traceability beyond Phase 1 source ids.
+**Phase 2**: Reliability layer — stall detection, checkpoint recovery per agent, retry policies, integrated rework orchestration.
 
-**Phase 4**: Quality system — structured reviewer feedback loop, golden case regression.
+**Phase 3**: Provenance — full causal chain, audit trail, claim-to-source traceability.
+
+**Phase 4**: Quality system — structured reviewer feedback loop, golden case regression (5 cases).
 
 ---
 
