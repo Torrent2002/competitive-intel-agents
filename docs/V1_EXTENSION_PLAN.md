@@ -14,31 +14,27 @@ operator-facing interface. The current v0 still has gaps around interaction,
 persistence, real collection/model adapters, provenance depth, and demo polish.
 This document turns those gaps into the next module sequence.
 
-## Current V0 Reality
+## Current Status (2026-06-08)
+
+✅ Modules 01-30 all implemented.
 
 Implemented:
-
-- deterministic fake end-to-end pipeline;
-- CLI `run` command;
+- deterministic fake & provider-backed end-to-end pipeline (OpenAI + Anthropic Messages API);
+- CLI commands: `run`, `chat`, `dashboard`, `runs`, `export`, `golden`, `web`;
+- `--real-web` flag for real DuckDuckGo search + web fetch;
+- `--real-model` flag for provider-backed agent generation;
+- `config/model.json` for provider configuration;
+- interactive CLI with free-form input (LLM parses user intent);
+- multi-query collector with relevance filtering;
+- model-backed analyst (structured claims), writer (sectioned reports), reviewer (semantic review);
 - source, claim, report, reviewer feedback artifacts;
 - journal events and runtime harness decisions;
-- bounded rework loop primitive;
-- terminal dashboard snapshot/rendering module;
-- golden replay runner and metrics;
-- Chinese `docs/learn` coverage for modules 01-17.
-
-Not yet product-complete:
-
-- no interactive CLI conversation with agents;
-- dashboard rendering is not exposed as a user-facing command;
-- no persistent run database wired into CLI by default;
-- web tools are fake, not real search/fetch adapters;
-- model runtime is fake-first and not connected to provider config;
-- agents use deterministic rules, not provider-backed structured generation;
-- provenance is source-id level, not full causal-chain replay;
-- rework loop is implemented but not integrated into normal orchestrator run mode;
-- no basic web UI;
-- no packaged demo workflow or operator guide.
+- bounded rework loop with integrated orchestration;
+- terminal + web dashboard;
+- golden replay 5-case suite with CI exit codes;
+- report export (markdown/json/html) with provenance appendix;
+- persistent SQLite workspace;
+- Chinese `docs/learn` and `docs/modules` coverage for all 30 modules.
 
 ## V1 Module Sequence
 

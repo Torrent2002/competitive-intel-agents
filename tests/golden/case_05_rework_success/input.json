@@ -1,0 +1,6 @@
+{
+  "company": "Linear",
+  "market": "project management",
+  "competitors": ["Jira", "Asana"],
+  "questions": ["UX comparison", "performance", "integrations"]
+}

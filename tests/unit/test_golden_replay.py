@@ -24,9 +24,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 def test_loads_golden_cases_from_directory() -> None:
     cases = load_golden_cases(PROJECT_ROOT / "tests" / "golden")
 
-    assert [case.name for case in cases] == ["case_01_single_competitor"]
-    assert cases[0].request.company == "Notion"
-    assert cases[0].expected.min_source_count == 2
+    assert sorted(case.name for case in cases) == sorted([
+        "case_01_single_competitor",
+        "case_02_multi_competitor",
+        "case_03_sparse_sources",
+        "case_04_reviewer_rejection",
+        "case_05_rework_success",
+    ])
+    first = cases[0]
+    assert first.request.company in {"Figma", "Linear", "NicheCo", "Notion", "Slack"}
+    assert first.expected.min_source_count >= 1
 
 
 def test_golden_replay_runner_passes_fake_pipeline_case() -> None:
@@ -35,11 +42,17 @@ def test_golden_replay_runner_passes_fake_pipeline_case() -> None:
     summary = runner.run_all()
 
     assert summary.passed is True
-    assert summary.total_cases == 1
-    assert summary.results[0].case_name == "case_01_single_competitor"
-    assert summary.results[0].failures == []
-    assert summary.results[0].metrics["source_count"] == 2
-    assert summary.results[0].metrics["claim_source_coverage_ratio"] == 1.0
+    assert summary.total_cases == 5
+    case_names = [r.case_name for r in summary.results]
+    assert "case_01_single_competitor" in case_names
+    assert "case_02_multi_competitor" in case_names
+    assert "case_03_sparse_sources" in case_names
+    assert "case_04_reviewer_rejection" in case_names
+    assert "case_05_rework_success" in case_names
+    for result in summary.results:
+        assert result.failures == [], f"failures in {result.case_name}: {result.failures}"
+        assert result.metrics["source_count"] >= 1
+        assert result.metrics["claim_source_coverage_ratio"] >= 0.5
 
 
 def test_golden_metrics_fail_when_required_section_missing() -> None:

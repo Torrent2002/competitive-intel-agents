@@ -1,47 +1,63 @@
-# 学习文档 22：Provider 化模型运行时
+# 学习文档 22：Provider 化模型运行时（已完成）
 
-## 这个模块解决什么
+## 一句话概括
 
-项目未来要接真实 LLM，但 agent 不应该直接依赖 OpenAI、Anthropic 或其他厂商 SDK。模块 22 把模型调用收敛到 `ModelRuntime`，让 provider 成为可替换的 runtime 插件。
+模块 22 让 agent 从"硬编码 if/else"变成"调 LLM API"。支持 OpenAI 和 Anthropic 两种 API 格式，通过 `config/model.json` 或环境变量配置，fake 模式保持不变。
+
+## 为什么需要它
+
+v0 的 agent 是硬编码的：collector 用模板拼 query，analyst 用固定句子写 claim，writer 用固定模板填 section。模块 22+23 是让 agent 真正"动脑子"的关键。
 
 ## 关键代码
 
 - `src/competitive_intel_agents/runtime/model_runtime.py`
-  - `Provider`：模型供应商最小协议。
-  - `FakeModelProvider`：默认 fake provider。
-  - `JsonPostTransport`：HTTP JSON POST 传输层。
-  - `HttpModelProvider`：OpenAI-compatible chat completions 适配器。
-  - `ConfiguredProviderFactory`：从环境变量创建 provider。
-  - `ModelRuntime`：统一返回 `ModelResponse`。
+  - `HttpModelProvider`：OpenAI 格式（`Authorization: Bearer`，响应从 `choices[0].message.content` 提取）
+  - `AnthropicMessagesProvider`：Anthropic 格式（`x-api-key`，`anthropic-version`，响应从 `content[].text` 提取）
+  - `ConfiguredProviderFactory`：环境变量优先 → `config/model.json` 兜底。明确传 `env={}` 时不读配置文件（给测试用）
+  - `JsonPostTransport`：自动检测 macOS Homebrew Python SSL 证书路径
 
-## 环境变量
+### 配置方式
 
-默认不需要任何环境变量，会使用 fake provider。
-
-接真实 provider 时：
-
-```bash
-export CIA_MODEL_PROVIDER=openai-compatible
-export CIA_MODEL_ENDPOINT=https://api.example.com/v1/chat/completions
-export CIA_MODEL_API_KEY=your_api_key
-export CIA_MODEL_NAME=your_model_name
+`config/model.json`（已加入 `.gitignore`）：
+```json
+{
+  "provider": "anthropic-compatible",
+  "endpoint": "https://api.deepseek.com/anthropic",
+  "model": "deepseek-v4-flash"
+}
 ```
 
-当前 `anthropic-compatible` 先作为边界占位，后续可以替换成真正 Anthropic Messages adapter。
+API key 通过环境变量 `CIA_MODEL_API_KEY` 传入，避免写入文件。
 
-## 为什么这样设计
+### Anthropic vs OpenAI API 的关键差异
 
-模型供应商变化很快，如果 agent 直接拼 HTTP 请求，后续会出现三类问题：
+| | OpenAI | Anthropic |
+|---|---|---|
+| 端点 | `/v1/chat/completions` | `/v1/messages` |
+| 认证 | `Authorization: Bearer` | `x-api-key` |
+| 响应格式 | `choices[0].message.content` | `content[0].text` |
+| response_format | 原生支持 `json_object` | 不支持，需 prompt 注入 |
 
-1. 单测需要真实 key 或复杂 mock。
-2. 每个 agent 都要处理 provider 差异。
-3. provider 异常可能直接打断 harness。
+### JSON 解析的三层兜底
 
-现在 `ModelRuntime.complete()` 会把异常转成 `ModelResponse(ok=False)`，provider response 也归一化到 `content/usage/parsed/error`。这让 agent 代码只关注业务结构。
+```python
+# 1. 直接 json.loads
+try: return json.loads(content)
+# 2. 提取 ```json ... ```
+m = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', content)
+# 3. 正则匹配 { ... }
+m = re.search(r'\{.*\}', content)
+```
 
-## 后续扩展
+### SSL 证书自动修复
 
-- 真正实现 Anthropic Messages API adapter。
-- 将 usage 写入 journal 或 dashboard。
-- 增加 provider retry/backoff。
-- 支持按 agent profile 选择模型。
+macOS Homebrew Python 缺少根证书，代码自动检测：
+```python
+for cert_path in ("/etc/ssl/cert.pem", "/opt/homebrew/etc/openssl@3/cert.pem"):
+    if Path(cert_path).exists():
+        os.environ["SSL_CERT_FILE"] = cert_path
+```
+
+## 面试怎么讲
+
+> 模型运行时是 agent 和 LLM 之间的抽象层。agent 不直接拼 HTTP，不解析供应商响应差异。我们同时支持 OpenAI 和 Anthropic 两种 API 格式，fake 模式对 186 个单元测试完全透明——不配置 API key 就回退到确定性 fake provider。SSL 证书在 macOS Homebrew Python 下自动修复，用户不需要手动配置。

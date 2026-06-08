@@ -12,7 +12,9 @@ from competitive_intel_agents.models import (
     ReviewFeedback,
     RunContext,
     SourceArtifact,
+    ReviewIssue,
 )
+from competitive_intel_agents.runtime.model_runtime import ModelRuntime
 
 
 class ReviewerAgent(BaseAgent):
@@ -28,8 +30,13 @@ class ReviewerAgent(BaseAgent):
         "Sources",
     )
 
-    def __init__(self, artifacts: ArtifactStore) -> None:
+    def __init__(
+        self,
+        artifacts: ArtifactStore,
+        model_runtime: ModelRuntime | None = None,
+    ) -> None:
         self._artifacts = artifacts
+        self._model_runtime = model_runtime
 
     def run_round(self, context: RunContext, state: AgentState) -> AgentRoundResult:
         report = self._artifacts.get_latest_report(context.run_id)
@@ -54,12 +61,21 @@ class ReviewerAgent(BaseAgent):
         sources = {
             source.id: source for source in self._artifacts.list_sources(context.run_id)
         }
-        feedback = self._review_report(report, claims, sources)
-        if feedback:
+
+        # Always run rule-based checks (deterministic, fast, no model needed)
+        rule_feedback = self._review_report(report, claims, sources)
+
+        # If model is available, also run deeper semantic review
+        model_feedback: list[ReviewFeedback] = []
+        if self._model_runtime is not None:
+            model_feedback = self._model_review(report, claims, sources, context)
+
+        all_feedback = _unique_feedback(rule_feedback + model_feedback)
+        if all_feedback:
             return AgentRoundResult(
                 completed=False,
                 signals=["rework_required"],
-                review_feedback=feedback,
+                review_feedback=all_feedback,
             )
 
         return AgentRoundResult(
@@ -67,6 +83,95 @@ class ReviewerAgent(BaseAgent):
             output_artifact_ids=[report.id],
             signals=["approved"],
         )
+
+    def _model_review(
+        self,
+        report: ReportDraft,
+        claims: dict[str, AnalysisClaim],
+        sources: dict[str, SourceArtifact],
+        context: RunContext,
+    ) -> list[ReviewFeedback]:
+        """Use model for deeper semantic analysis of report quality."""
+        from competitive_intel_agents.prompts import AgentPromptLibrary, StructuredOutputValidator
+
+        prompt_lib = AgentPromptLibrary()
+        report_json = {
+            "sections": dict(report.sections),
+            "claim_ids": report.claim_ids,
+            "source_ids": report.source_ids,
+        }
+        claims_json = {
+            cid: {"text": c.text, "source_ids": c.source_ids, "confidence": c.confidence}
+            for cid, c in claims.items()
+        }
+        sources_json = {
+            sid: {"title": s.title, "url": s.url, "snippet": s.snippet[:300]}
+            for sid, s in sources.items()
+        }
+
+        task = (
+            f"Review this competitive intelligence report about {context.request.company}. "
+            f"Check for: unsupported claims (facts not backed by sources), "
+            f"weak inferences, unclear writing, missing depth. "
+            f"Return a JSON object with a 'feedback' array. Each feedback item must have: "
+            f"'issue' (one of: missing_source, unsupported_claim, weak_inference, unclear_writing, "
+            f"format_violation, missing_section), "
+            f"'target_agent' (collector/analyst/writer/reviewer), "
+            f"'target_artifact_id', 'message', 'required_action'. "
+            f"Only report genuine issues — an empty feedback array is OK if quality is good."
+        )
+        model_req = prompt_lib.build(
+            self.name,
+            task,
+            {
+                "report": report_json,
+                "claims": claims_json,
+                "sources": sources_json,
+            },
+        )
+        resp = self._model_runtime.complete(model_req)
+        if not resp.ok or not resp.parsed:
+            return []
+
+        validator = StructuredOutputValidator()
+        try:
+            validator.validate(self.name, resp.parsed)
+        except Exception:
+            return []
+
+        feedback_payload = resp.parsed.get("feedback", [])
+        if not isinstance(feedback_payload, list):
+            return []
+
+        result: list[ReviewFeedback] = []
+        valid_issues = {
+            "missing_source", "unsupported_claim", "weak_inference",
+            "unclear_writing", "format_violation", "missing_section",
+        }
+        for item in feedback_payload:
+            if not isinstance(item, dict):
+                continue
+            issue = str(item.get("issue", ""))
+            if issue not in valid_issues:
+                continue
+            target_agent = str(item.get("target_agent", ""))
+            if target_agent not in {"collector", "analyst", "writer", "reviewer"}:
+                continue
+            target_artifact_id = str(item.get("target_artifact_id", ""))
+            message = str(item.get("message", ""))
+            required_action = str(item.get("required_action", ""))
+            if not target_artifact_id or not message or not required_action:
+                continue
+            result.append(
+                ReviewFeedback(
+                    issue=issue,
+                    target_agent=target_agent,
+                    target_artifact_id=target_artifact_id,
+                    message=message,
+                    required_action=required_action,
+                )
+            )
+        return result
 
     def _review_report(
         self,

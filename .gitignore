@@ -6,3 +6,5 @@ __pycache__/
 .pytest_cache/
 dist/
 build/
+config/model.json
+.competitive-intel/

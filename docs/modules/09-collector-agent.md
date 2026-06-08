@@ -1,91 +1,52 @@
-# 09 Collector Agent
+# 09 Collector Agent（v2：多查询 + 相关性过滤）
 
 ## Goal
 
-Collect competitive intelligence sources and save them as `SourceArtifact` records.
+收集竞品情报来源，保存为 `SourceArtifact`。v2 支持多角度搜索、域名去重、模型相关性过滤、查询细化。
 
 ## Scope
 
 In scope:
-
-- Generate search queries from the run input.
-- Request `web_search` and `web_fetch` through `ToolCall` objects.
-- Consume prior `ToolResult` records from `AgentState.memory["tool_results"]`.
-- Save source artifacts.
-- Avoid duplicate URLs.
-- Stop when the configured source target is reached.
+- 模型生成 3-5 个多角度搜索查询（产品、定价、竞品对比、技术、新闻）。
+- 批量搜索 → 域名去重选 URL → 分批抓取。
+- 模型判断抓取内容是否与研究主题相关，无关则跳过。
+- 模型提取结构化 title + 2-3 句事实摘要。
+- 首轮不足时自动生成细化查询。
+- Fake 模式保持 2 source 目标；model-backed 模式目标为 5。
 
 Out of scope:
+- Deep crawling、source credibility scoring。
 
-- Deep crawling.
-- Source credibility scoring.
-- Analyst conclusions.
+## Round Flow v2
 
-## Inputs
-
-- `RunContext`
-- `AgentState`
-- Company or product name.
-- Market or competitor hints.
-- Prior tool results from harness-managed agent memory.
-- `ArtifactStore` dependency injected into the collector.
-
-## Outputs
-
-- `SourceArtifact` records.
-- `ToolCall` requests for search/fetch.
-- Progress signals.
-
-## Public Interface
-
-```python
-class CollectorAgent(BaseAgent):
-    name = "collector"
-
-    def __init__(self, artifacts: ArtifactStore, target_sources: int = 2) -> None: ...
-    def run_round(self, context: RunContext, state: AgentState) -> AgentRoundResult: ...
+```
+Round 1: 生成 3-5 个多角度查询 → 批量 web_search
+Round 2: 接收搜索结果 → 域名去重 → 批量 web_fetch (最多 5 个/轮)
+Round 3: 接收抓取结果 → 模型相关性过滤 → 模型提取 title+摘要 → 保存
+Round 4+: 不够 target → 生成细化查询 → 重复搜索/抓取
 ```
 
-## Round Flow v0
+## 关键细节
 
-1. If enough active sources already exist in `ArtifactStore`, return `completed=True`.
-2. If there are no prior tool results, request one `web_search` call using company, market, competitors, and questions.
-3. If prior tool results contain search results, deduplicate URLs and request `web_fetch` calls for URLs not already saved.
-4. If prior tool results contain fetch results, save each unique URL as a `SourceArtifact`.
-5. Return saved source ids through `output_artifact_ids`.
-
-The collector never executes tools directly. Runtime execution remains owned by
-the harness.
-
-## Source Ids
-
-Source ids are deterministic in v0:
-
-```text
-source_{run_id}_{index:03d}
-```
-
-This keeps tests stable and makes journal output readable. A later artifact id
-service can replace this if concurrent collectors are introduced.
-
-## Deduplication Rules
-
-- Duplicate URLs inside one search result batch are fetched once.
-- URLs already saved as active `SourceArtifact` records are skipped.
-- Duplicate fetch results do not overwrite existing artifacts.
+- **多查询生成**：模型根据不同角度（产品、定价、竞品、技术、新闻）生成多样化查询。
+- **URL 选择**：优先覆盖不同域名，再补充同域名其他页面。
+- **相关性过滤**：模型快速判断页面是否相关（`{"relevant": true/false}`），不相关直接跳过。
+- **内容提取**：模型从原始 HTML 提取 80 字标题 + 400 字事实摘要。
+- **细化查询**：当前来源不够时，模型根据已找到的内容生成补充角度查询。
+- **诊断输出**：stderr 实时打印保存进度和跳过原因。
 
 ## Tests
 
-- Produces source artifacts from fake search results.
-- Deduplicates repeated URLs.
-- Stops when enough sources are collected.
-- Does not produce analysis claims.
-- Builds search query from company, market, competitors, and questions.
-- Runs through `RuntimeHarness` with fake tools.
+- 多查询生成（fake 模式 ≥1 个 tool call）。
+- 从 fake 搜索结果去重获取 URL。
+- 通过 RuntimeHarness 运行（fake tools）。
+- 默认 target 为 2（fake）/ 5（model-backed）。
 
 ## Done Criteria
 
-- Collector can run through the harness.
-- Source artifacts include url, title, snippet, and retrieval timestamp.
-- Collector does not depend directly on `ToolRuntime`.
-- Collector only writes source artifacts, not claims or reports.
+- [x] Collector 支持多角度搜索查询。
+- [x] 域名去重和 URL 选择策略。
+- [x] 模型相关性过滤（model-backed 模式）。
+- [x] 模型内容提取（model-backed 模式）。
+- [x] 首轮不足时查询细化。
+- [x] 186 测试全绿。
