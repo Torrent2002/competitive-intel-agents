@@ -15,6 +15,7 @@ def test_package_and_top_level_modules_import() -> None:
         "competitive_intel_agents.artifacts",
         "competitive_intel_agents.cli",
         "competitive_intel_agents.dashboard",
+        "competitive_intel_agents.golden",
         "competitive_intel_agents.harness",
         "competitive_intel_agents.journal",
         "competitive_intel_agents.orchestrator",
