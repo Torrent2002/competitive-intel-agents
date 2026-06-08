@@ -208,6 +208,7 @@ class AgentResult(SerializableModel):
     decision: HarnessDecision
     rounds: int
     output_artifact_ids: list[str] = field(default_factory=list)
+    review_feedback: list["ReviewFeedback"] = field(default_factory=list)
     error: str | None = None
 
     def __post_init__(self) -> None:
@@ -227,6 +228,7 @@ class RoundEvent(SerializableModel):
     tool_calls: list[ToolCall] = field(default_factory=list)
     output_artifact_ids: list[str] = field(default_factory=list)
     signals: list[str] = field(default_factory=list)
+    review_feedback: list["ReviewFeedback"] = field(default_factory=list)
     timestamp: str = field(default_factory=utc_now_iso)
 
     _nested_list_types: ClassVar[dict[str, type[SerializableModel]]] = {
@@ -343,6 +345,13 @@ class RunResult(SerializableModel):
 
 
 AgentRoundResult._nested_list_types = {
+    "tool_calls": ToolCall,
+    "review_feedback": ReviewFeedback,
+}
+AgentResult._nested_list_types = {
+    "review_feedback": ReviewFeedback,
+}
+RoundEvent._nested_list_types = {
     "tool_calls": ToolCall,
     "review_feedback": ReviewFeedback,
 }

@@ -18,6 +18,7 @@ In scope:
 - Pass shared stores to agents.
 - Pass only each agent's allowed repository/tool/model capabilities.
 - Stop on approval or abort.
+- Return `needs_rework` with reviewer feedback when the reviewer emits fixable feedback.
 - Preserve the artifact sequence: sources -> claims -> report -> review.
 - Keep orchestration logic outside the CLI.
 
@@ -56,14 +57,69 @@ class Orchestrator:
     def run(self, request: CompetitiveIntelRequest) -> RunResult: ...
 ```
 
+Constructor dependencies are injectable so tests and future production adapters can
+replace stores, harness, and run id generation without changing control flow:
+
+```python
+Orchestrator(
+    artifacts: ArtifactStore | None = None,
+    journal: JournalStore | None = None,
+    harness: Harness | None = None,
+    agent_profiles: dict[str, AgentProfile] | None = None,
+    run_id_factory: Callable[[], str] | None = None,
+)
+```
+
+Default local runtime:
+
+- `InMemoryArtifactStore`
+- `InMemoryJournalStore`
+- `RuntimeHarness`
+- `InMemoryCheckpointStore`
+- `ToolRuntime` with deterministic `FakeWebSearch` and `FakeWebFetch`
+- profiles loaded from `config/agent_profiles.yaml`
+
+## Run Status v0
+
+| Status | Meaning |
+|---|---|
+| `approved` | Reviewer stopped with approval and no blocking feedback. |
+| `needs_rework` | Reviewer returned structured feedback and harness returned `rework`. |
+| `aborted` | A non-recoverable harness abort happened before approval. |
+
+The orchestrator does not decide how to fix `needs_rework`; module 15 owns the
+bounded rework loop.
+
+## Control Flow
+
+```text
+create RunContext
+  -> Collector through RuntimeHarness
+  -> Analyst through RuntimeHarness
+  -> Writer through RuntimeHarness
+  -> Reviewer through RuntimeHarness
+  -> RunResult
+```
+
+The orchestrator treats `AgentResult.decision` as the control signal:
+
+- `stop`: move to the next stage.
+- `rework`: stop the current run and return reviewer feedback.
+- `abort`: stop the current run and return an aborted status.
+
+It does not pass raw collector transcripts to downstream agents. Downstream
+agents only read structured artifacts from the shared artifact store.
+
 ## Tests
 
 - Runs agents in the expected order.
 - Stops when reviewer approves.
 - Aborts when harness aborts.
+- Returns `needs_rework` with structured reviewer feedback.
 - Records run-level status.
 - Verifies artifact flow order: sources before claims, claims before report, report before review.
 - Ensures CLI can call orchestrator without duplicating pipeline logic.
+- Creates `RunContext` with role-bounded `AgentProfile` grants.
 
 ## Done Criteria
 
@@ -71,3 +127,4 @@ class Orchestrator:
 - The CLI can call the orchestrator without duplicating orchestration logic.
 - Real agents can be added without changing orchestrator control flow.
 - The pipeline can explain which artifacts each stage consumed and produced.
+- Reviewer feedback can reach `RunResult` without parsing natural-language messages.

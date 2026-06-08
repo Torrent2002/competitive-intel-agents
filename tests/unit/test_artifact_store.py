@@ -247,6 +247,53 @@ def test_get_latest_report_returns_highest_version(store_factory) -> None:
 
 
 @pytest.mark.parametrize("store_factory", [InMemoryArtifactStore, SQLiteArtifactStore])
+def test_get_artifact_returns_current_status_for_audit(store_factory) -> None:
+    """Rework needs direct artifact lookup without relying on active listings."""
+    store = store_factory()
+    claim = make_claim("claim_audit", run_id="run_001")
+
+    store.save_claim(claim)
+    store.mark_rejected("claim_audit", "Unsupported claim")
+
+    result = store.get_artifact("claim_audit")
+
+    assert result.id == "claim_audit"
+    assert result.status == "rejected"
+
+
+@pytest.mark.parametrize("store_factory", [InMemoryArtifactStore, SQLiteArtifactStore])
+def test_list_artifacts_can_include_all_statuses(store_factory) -> None:
+    """Agents need all artifacts for monotonic ids, while reads default to active."""
+    store = store_factory()
+    claim_v1 = make_claim("claim_v1", run_id="run_001")
+    claim_v2 = AnalysisClaim(
+        id="claim_v2",
+        run_id="run_001",
+        text="Revised claim",
+        source_ids=["src_001"],
+        version=2,
+        supersedes_id="claim_v1",
+    )
+    report_v1 = make_report("report_v1", run_id="run_001")
+
+    store.save_claim(claim_v1)
+    store.save_claim(claim_v2)
+    store.mark_superseded("claim_v1", "claim_v2")
+    store.save_report(report_v1)
+    store.mark_rejected("report_v1", "Stale report")
+
+    assert [claim.id for claim in store.list_claims("run_001")] == ["claim_v2"]
+    assert {claim.id for claim in store.list_claims("run_001", status=None)} == {
+        "claim_v1",
+        "claim_v2",
+    }
+    assert store.get_latest_report("run_001") is None
+    assert [report.id for report in store.list_reports("run_001", status=None)] == [
+        "report_v1"
+    ]
+
+
+@pytest.mark.parametrize("store_factory", [InMemoryArtifactStore, SQLiteArtifactStore])
 def test_rejects_duplicate_artifact_ids(store_factory) -> None:
     """Artifact ids are immutable; rework must write a new id."""
     store = store_factory()

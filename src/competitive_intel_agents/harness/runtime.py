@@ -67,6 +67,7 @@ class RuntimeHarness:
     def run_agent(self, context: RunContext, agent: Agent) -> AgentResult:
         max_rounds = self._max_rounds(context, agent.name)
         output_artifact_ids: list[str] = []
+        review_feedback = []
         last_decision: HarnessDecision = "abort"
         state_memory: dict[str, object] = {}
 
@@ -79,13 +80,15 @@ class RuntimeHarness:
                 state_memory=state_memory,
             )
             output_artifact_ids.extend(event.output_artifact_ids)
+            review_feedback.extend(event.review_feedback)
             last_decision = event.decision
-            if event.decision in {"stop", "abort"}:
+            if event.decision in {"stop", "rework", "abort"}:
                 return AgentResult(
                     agent=agent.name,
                     decision=event.decision,
                     rounds=round_index,
                     output_artifact_ids=output_artifact_ids,
+                    review_feedback=review_feedback,
                 )
 
         return AgentResult(
@@ -93,6 +96,7 @@ class RuntimeHarness:
             decision=last_decision,
             rounds=max_rounds,
             output_artifact_ids=output_artifact_ids,
+            review_feedback=review_feedback,
         )
 
     def run_round(
@@ -139,6 +143,7 @@ class RuntimeHarness:
             tool_calls=signed_tool_calls,
             output_artifact_ids=result.output_artifact_ids,
             signals=signals,
+            review_feedback=result.review_feedback,
         )
         self._journal.append(event)
         self._save_checkpoint(context, agent.name, round_index, result.signals)
@@ -175,6 +180,8 @@ class RuntimeHarness:
     ) -> HarnessDecision:
         if completed:
             return "stop"
+        if "rework_required" in signals:
+            return "rework"
         if self._has_repeated_tool_call(run_id, agent, signed_tool_calls):
             signals.append("repeated_tool_call")
             return "abort"

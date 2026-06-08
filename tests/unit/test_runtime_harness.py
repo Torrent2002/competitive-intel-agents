@@ -12,6 +12,7 @@ from competitive_intel_agents.models import (
     AgentState,
     CompetitiveIntelRequest,
     RunContext,
+    ReviewFeedback,
     ToolCall,
 )
 from competitive_intel_agents.runtime import FakeWebFetch, FakeWebSearch, ToolRuntime
@@ -110,6 +111,25 @@ class ToolResultAwareAgent(BaseAgent):
                 )
             ],
             signals=["tool_requested"],
+        )
+
+
+class ReworkAgent(BaseAgent):
+    name = "reviewer"
+
+    def run_round(self, context: RunContext, state: AgentState) -> AgentRoundResult:
+        return AgentRoundResult(
+            completed=False,
+            signals=["rework_required"],
+            review_feedback=[
+                ReviewFeedback(
+                    issue="missing_section",
+                    target_agent="writer",
+                    target_artifact_id="report_001",
+                    message="Missing Pricing.",
+                    required_action="Add Pricing.",
+                )
+            ],
         )
 
 
@@ -246,3 +266,27 @@ def test_run_agent_passes_tool_results_to_next_round_memory() -> None:
     assert result.output_artifact_ids == ["source_from_tool_result"]
     assert events[0].decision == "continue"
     assert events[1].signals == ["saw_tool_result"]
+
+
+def test_run_agent_returns_rework_decision_with_review_feedback() -> None:
+    harness, journal, _ = make_harness()
+    context = RunContext(
+        run_id="run_001",
+        request=CompetitiveIntelRequest(company="ACME"),
+        agent_profiles={
+            "reviewer": AgentProfile(
+                agent="reviewer",
+                max_rounds=4,
+                allowed_tools=[],
+            )
+        },
+    )
+
+    result = harness.run_agent(context, ReworkAgent())
+    events = journal.list_run_events("run_001")
+
+    assert result.decision == "rework"
+    assert result.rounds == 1
+    assert result.review_feedback[0].issue == "missing_section"
+    assert events[0].decision == "rework"
+    assert events[0].review_feedback[0].target_agent == "writer"

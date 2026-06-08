@@ -13,6 +13,8 @@ In scope:
 - Save and retrieve report drafts.
 - Query artifacts by `run_id`.
 - Query only active artifacts by default.
+- Query artifacts by explicit status, or all statuses with `status=None`.
+- Retrieve a single artifact by id for audit/rework.
 - Mark artifacts as superseded or rejected during rework.
 
 Out of scope:
@@ -26,11 +28,13 @@ Out of scope:
 ```python
 class ArtifactStore:
     def save_source(self, artifact: SourceArtifact) -> None: ...
-    def list_sources(self, run_id: str) -> list[SourceArtifact]: ...
+    def list_sources(self, run_id: str, status: ArtifactStatus | None = "active") -> list[SourceArtifact]: ...
+    def get_artifact(self, artifact_id: str) -> SourceArtifact | AnalysisClaim | ReportDraft: ...
     def save_claim(self, claim: AnalysisClaim) -> None: ...
-    def list_claims(self, run_id: str, status: ArtifactStatus = "active") -> list[AnalysisClaim]: ...
+    def list_claims(self, run_id: str, status: ArtifactStatus | None = "active") -> list[AnalysisClaim]: ...
     def save_report(self, report: ReportDraft) -> None: ...
     def get_latest_report(self, run_id: str) -> ReportDraft | None: ...
+    def list_reports(self, run_id: str, status: ArtifactStatus | None = "active") -> list[ReportDraft]: ...
     def mark_superseded(self, artifact_id: str, replacement_id: str) -> None: ...
     def mark_rejected(self, artifact_id: str, reason: str) -> None: ...
 ```
@@ -44,6 +48,8 @@ class ArtifactStore:
 - A replacement artifact should set `supersedes_id` to the previous artifact id.
 - `mark_superseded(old_id, replacement_id)` validates that both artifacts exist, share the same `run_id`, share the same artifact type, and that the replacement points back to `old_id`.
 - Default list methods should return only `active` artifacts unless a different status is requested.
+- `status=None` returns artifacts across all statuses and is intended for audit, version-chain checks, and monotonic id generation.
+- `get_artifact(id)` returns the artifact with its current store status even when it is `rejected` or `superseded`.
 - Rejected artifacts stay available for audit but should not be consumed by downstream agents.
 - Returned artifacts must expose their current store status. If an artifact is listed through `status="superseded"` or `status="rejected"`, its model `status` field must match.
 - In-memory and SQLite implementations must follow the same duplicate, status, and lineage semantics.
@@ -64,6 +70,8 @@ class ArtifactStore:
 - Exclude rejected artifacts from default reads.
 - Reject duplicate artifact ids.
 - Return model objects with current `status` after rejection or supersession.
+- Return an artifact by id for audit even after rejection.
+- List artifacts across all statuses when requested.
 - Reject supersede operations across different runs or artifact types.
 - Reject replacements without the correct `supersedes_id` or forward version.
 

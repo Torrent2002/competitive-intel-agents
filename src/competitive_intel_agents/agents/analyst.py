@@ -83,7 +83,7 @@ class AnalystAgent(BaseAgent):
         )
 
     def _next_claim_id(self, run_id: str) -> str:
-        next_index = len(self._artifacts.list_claims(run_id)) + 1
+        next_index = len(self._artifacts.list_claims(run_id, status=None)) + 1
         return f"claim_{run_id}_{next_index:03d}"
 
     @staticmethod

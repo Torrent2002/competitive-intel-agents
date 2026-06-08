@@ -105,7 +105,8 @@ class WriterAgent(BaseAgent):
         return source_ids
 
     def _next_report_id(self, run_id: str) -> str:
-        existing = self._artifacts.get_latest_report(run_id)
-        if existing is None:
+        reports = self._artifacts.list_reports(run_id, status=None)
+        if not reports:
             return f"report_{run_id}_001"
-        return f"report_{run_id}_{existing.version + 1:03d}"
+        next_index = len(reports) + 1
+        return f"report_{run_id}_{next_index:03d}"

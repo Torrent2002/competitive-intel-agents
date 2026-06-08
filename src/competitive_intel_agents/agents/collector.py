@@ -118,7 +118,7 @@ class CollectorAgent(BaseAgent):
         return saved_ids
 
     def _next_source_id(self, run_id: str) -> str:
-        next_index = len(self._artifacts.list_sources(run_id)) + 1
+        next_index = len(self._artifacts.list_sources(run_id, status=None)) + 1
         return f"source_{run_id}_{next_index:03d}"
 
     @staticmethod
