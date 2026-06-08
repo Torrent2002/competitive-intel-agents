@@ -165,3 +165,23 @@ def test_round_event_round_trips_nested_tool_calls() -> None:
 
     assert decoded == event
     assert isinstance(decoded.tool_calls[0], ToolCall)
+
+
+def test_agent_round_result_round_trips_review_feedback() -> None:
+    result = AgentRoundResult(
+        completed=False,
+        review_feedback=[
+            ReviewFeedback(
+                issue="missing_section",
+                target_agent="writer",
+                target_artifact_id="report_001",
+                message="Missing Pricing section.",
+                required_action="Add a Pricing section backed by claims.",
+            )
+        ],
+    )
+
+    decoded = AgentRoundResult.from_dict(json.loads(json.dumps(result.to_dict())))
+
+    assert decoded == result
+    assert isinstance(decoded.review_feedback[0], ReviewFeedback)

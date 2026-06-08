@@ -193,6 +193,7 @@ class AgentRoundResult(SerializableModel):
     tool_calls: list[ToolCall] = field(default_factory=list)
     output_artifact_ids: list[str] = field(default_factory=list)
     signals: list[str] = field(default_factory=list)
+    review_feedback: list["ReviewFeedback"] = field(default_factory=list)
     message: str = ""
     error: str | None = None
 
@@ -339,3 +340,9 @@ class RunResult(SerializableModel):
     def __post_init__(self) -> None:
         require_non_empty(self.run_id, "run_id")
         require_non_empty(self.status, "status")
+
+
+AgentRoundResult._nested_list_types = {
+    "tool_calls": ToolCall,
+    "review_feedback": ReviewFeedback,
+}

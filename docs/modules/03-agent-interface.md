@@ -45,6 +45,8 @@ Should include:
 ## Data Access Matrix
 
 Agents should receive narrow repository/tool/model capabilities instead of unrestricted shared state.
+The matrix is the role-level ceiling; run-specific `AgentProfile.allowed_tools`
+can only narrow it.
 
 | Agent | May Read | May Write | May Use Tools |
 |---|---|---|---|
@@ -59,6 +61,10 @@ Rules:
 - Writer should not read raw fetched pages directly; it should consume claims and source metadata.
 - Analyst should not call web tools; missing evidence should become reviewer feedback routed to Collector.
 - Reviewer should not mutate artifacts; it only approves or returns feedback.
+- `AGENT_ACCESS_MATRIX.allowed_tools` defines maximum role capability, not a per-run grant.
+- `AgentProfile.allowed_tools` defines the effective grant for a specific run and must be intersected with the role ceiling.
+- Tool execution must reject any `ToolCall` whose `requested_by` does not match the agent currently being run.
+- Downstream modules should depend on narrow policy/resolver interfaces instead of importing the matrix directly when they need effective permissions.
 
 ## Tests
 
@@ -71,6 +77,7 @@ Rules:
 
 - Harness can run any conforming agent through `competitive_intel_agents.agents.Agent`.
 - Agent implementations do not write journal events directly.
+- Tool permissions cannot be expanded by run configuration beyond the static role boundary.
 
 ## 中文学习笔记
 

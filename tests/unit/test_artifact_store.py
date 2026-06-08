@@ -5,6 +5,8 @@ import pytest
 from competitive_intel_agents.artifacts import (
     ArtifactStore,
     InMemoryArtifactStore,
+    DuplicateArtifactError,
+    InvalidArtifactLineageError,
     SQLiteArtifactStore,
 )
 from competitive_intel_agents.models import AnalysisClaim, ReportDraft, SourceArtifact
@@ -152,6 +154,7 @@ def test_mark_old_claims_as_superseded(store_factory) -> None:
     all_claims = store.list_claims("run_001", status="superseded")
     assert len(all_claims) == 1
     assert all_claims[0].id == "claim_v1"
+    assert all_claims[0].status == "superseded"
 
 
 @pytest.mark.parametrize("store_factory", [InMemoryArtifactStore, SQLiteArtifactStore])
@@ -174,6 +177,7 @@ def test_exclude_rejected_artifacts_from_default_reads(store_factory) -> None:
     rejected = store.list_claims("run_001", status="rejected")
     assert len(rejected) == 1
     assert rejected[0].id == "claim_bad"
+    assert rejected[0].status == "rejected"
 
 
 @pytest.mark.parametrize("store_factory", [InMemoryArtifactStore, SQLiteArtifactStore])
@@ -240,3 +244,79 @@ def test_get_latest_report_returns_highest_version(store_factory) -> None:
     latest = store.get_latest_report("run_001")
     assert latest is not None
     assert latest.id == "report_v2"
+
+
+@pytest.mark.parametrize("store_factory", [InMemoryArtifactStore, SQLiteArtifactStore])
+def test_rejects_duplicate_artifact_ids(store_factory) -> None:
+    """Artifact ids are immutable; rework must write a new id."""
+    store = store_factory()
+    claim = make_claim("claim_dup", run_id="run_001")
+
+    store.save_claim(claim)
+
+    with pytest.raises(DuplicateArtifactError, match="claim_dup"):
+        store.save_claim(claim)
+
+
+@pytest.mark.parametrize("store_factory", [InMemoryArtifactStore, SQLiteArtifactStore])
+def test_supersede_requires_same_run_and_type(store_factory) -> None:
+    """Replacement artifacts must not cross run or artifact type boundaries."""
+    store = store_factory()
+    old_claim = make_claim("claim_old", run_id="run_A")
+    wrong_run = AnalysisClaim(
+        id="claim_new_wrong_run",
+        run_id="run_B",
+        text="Revised claim",
+        source_ids=["src_001"],
+        version=2,
+        supersedes_id="claim_old",
+    )
+    wrong_type = ReportDraft(
+        id="report_replacement",
+        run_id="run_A",
+        sections={"summary": "Not a claim replacement."},
+        version=2,
+        supersedes_id="claim_old",
+    )
+
+    store.save_claim(old_claim)
+    store.save_claim(wrong_run)
+    store.save_report(wrong_type)
+
+    with pytest.raises(InvalidArtifactLineageError, match="same run_id"):
+        store.mark_superseded("claim_old", "claim_new_wrong_run")
+
+    with pytest.raises(InvalidArtifactLineageError, match="same artifact type"):
+        store.mark_superseded("claim_old", "report_replacement")
+
+
+@pytest.mark.parametrize("store_factory", [InMemoryArtifactStore, SQLiteArtifactStore])
+def test_supersede_requires_forward_version_and_pointer(store_factory) -> None:
+    """Replacement artifacts must be newer and point back to the old artifact."""
+    store = store_factory()
+    old_claim = make_claim("claim_old", run_id="run_001")
+    missing_pointer = AnalysisClaim(
+        id="claim_missing_pointer",
+        run_id="run_001",
+        text="Revised claim",
+        source_ids=["src_001"],
+        version=2,
+    )
+    stale_version = AnalysisClaim(
+        id="claim_stale_version",
+        run_id="run_001",
+        text="Another revised claim",
+        source_ids=["src_001"],
+        version=1,
+        supersedes_id="claim_old",
+    )
+
+    store.save_claim(old_claim)
+    store.save_claim(missing_pointer)
+    store.save_claim(stale_version)
+
+    with pytest.raises(InvalidArtifactLineageError, match="supersedes_id"):
+        store.mark_superseded("claim_old", "claim_missing_pointer")
+
+    with pytest.raises(InvalidArtifactLineageError, match="version"):
+        store.mark_superseded("claim_old", "claim_stale_version")

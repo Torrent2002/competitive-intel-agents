@@ -2,6 +2,10 @@
 
 This document breaks the project into small implementation modules. Each module should be implemented through a focused spec before coding.
 
+The project positioning is defined in [Architecture Principles](ARCHITECTURE_PRINCIPLES.md):
+this is an evidence-first, auditable competitive intelligence workflow. Multi-agent
+execution is an implementation technique, not the primary differentiator.
+
 The intended development style is:
 
 1. Pick one module.
@@ -23,10 +27,10 @@ The intended development style is:
 | 7 | Model Runtime | Standardizes model calls and fake model tests |
 | 8 | Runtime Harness v0 | Wraps agent rounds with budget, signals, and decisions |
 | 9 | Collector Agent v0 | Produces source artifacts |
-| 10 | Analyst Agent v0 | Produces sourced analysis claims |
-| 11 | Writer Agent v0 | Produces a structured report draft |
-| 12 | Reviewer Agent v0 | Checks source coverage and returns structured feedback |
-| 13 | Orchestrator v0 | Runs the default four-agent DAG |
+| 10 | Analyst Agent v0 | Converts sources into claims that must carry source ids |
+| 11 | Writer Agent v0 | Produces a report draft from claims without inventing unsupported facts |
+| 12 | Reviewer Agent v0 | Checks source coverage and returns routable feedback |
+| 13 | Orchestrator v0 | Runs the role-bounded artifact pipeline |
 | 14 | CLI Entrypoint | Provides one command for fake and local runs |
 | 15 | Rework Loop v0 | Routes reviewer feedback back to the responsible agent |
 | 16 | Terminal Dashboard v0 | Shows run status from journal events |
@@ -55,7 +59,7 @@ Done when:
 
 ### Milestone 2: Structured Competitive Report
 
-Goal: the pipeline creates a report draft from structured artifacts.
+Goal: the pipeline creates a source-backed report draft from structured artifacts.
 
 Includes:
 
@@ -72,13 +76,14 @@ Done when:
 
 - A sample input produces source artifacts, analysis claims, and a report draft.
 - The final report includes source references.
+- Every factual claim in the draft can be traced to `AnalysisClaim.source_ids`.
 - Orchestrator can run the default DAG end to end.
 - `tests/fixtures/` contains a fake request and expected artifact/report shape.
 - `competitive-intel run --input tests/fixtures/request.json` can run the fake pipeline.
 
 ### Milestone 3: Quality and Rework
 
-Goal: reviewer feedback can reject and route fixable issues.
+Goal: reviewer feedback can reject and route fixable issues to the responsible stage.
 
 Includes:
 
@@ -90,6 +95,7 @@ Done when:
 - Unsupported claims are rejected.
 - Review feedback has a target agent and artifact id.
 - Rework attempts are capped.
+- Rework creates replacement artifacts instead of overwriting old artifacts.
 
 ### Milestone 4: Regression and Observability
 
@@ -104,6 +110,7 @@ Done when:
 
 - A terminal view summarizes rounds, tool calls, sources, claims, and health.
 - Golden cases compare schema expectations, source coverage, reviewer rejections, and cost counters.
+- Golden cases fail on source coverage regressions even when the prose still sounds plausible.
 
 ## Module Documents
 

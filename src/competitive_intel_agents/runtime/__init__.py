@@ -8,6 +8,7 @@ from competitive_intel_agents.runtime.model_runtime import (
 from competitive_intel_agents.runtime.tool_runtime import (
     FakeWebFetch,
     FakeWebSearch,
+    ToolPolicy,
     ToolRuntime,
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     "FakeWebSearch",
     "ModelRuntime",
     "Provider",
+    "ToolPolicy",
     "ToolRuntime",
 ]

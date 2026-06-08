@@ -6,8 +6,8 @@ import hashlib
 import json
 from typing import Protocol
 
-from competitive_intel_agents.agents.base import ensure_tool_allowed
-from competitive_intel_agents.models import AgentName, ToolCall, ToolResult
+from competitive_intel_agents.agents.base import get_agent_access
+from competitive_intel_agents.models import AgentName, RunContext, ToolCall, ToolResult
 
 
 class Tool(Protocol):
@@ -17,6 +17,38 @@ class Tool(Protocol):
 
     def run(self, args: dict) -> dict:
         ...
+
+
+class ToolPolicy:
+    """Resolve effective tool permissions for a run.
+
+    Static role access is the ceiling. A run's AgentProfile.allowed_tools may only
+    narrow that ceiling, never expand it.
+    """
+
+    def allowed_tools(
+        self, agent: AgentName, context: RunContext | None = None
+    ) -> frozenset[str]:
+        role_allowed = get_agent_access(agent).allowed_tools
+        if context is None:
+            return role_allowed
+        profile = context.agent_profiles.get(agent)
+        if profile is None:
+            return role_allowed
+        return role_allowed.intersection(profile.allowed_tools)
+
+    def ensure_allowed(
+        self,
+        agent: AgentName,
+        call: ToolCall,
+        context: RunContext | None = None,
+    ) -> None:
+        if call.requested_by != agent:
+            raise ValueError(
+                f"tool call requested_by {call.requested_by} cannot execute as {agent}"
+            )
+        if call.name not in self.allowed_tools(agent, context):
+            raise ValueError(f"tool {call.name} is not allowed for agent {agent}")
 
 
 class FakeWebSearch:
@@ -61,16 +93,22 @@ class FakeWebFetch:
 class ToolRuntime:
     """Executes tool calls with permission checks and generates stable signatures."""
 
-    def __init__(self) -> None:
+    def __init__(self, policy: ToolPolicy | None = None) -> None:
         self._tools: dict[str, Tool] = {}
+        self._policy = policy or ToolPolicy()
 
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
 
-    def execute(self, agent: AgentName, call: ToolCall) -> ToolResult:
+    def execute(
+        self,
+        agent: AgentName,
+        call: ToolCall,
+        context: RunContext | None = None,
+    ) -> ToolResult:
         # Permission check
         try:
-            ensure_tool_allowed(agent, call.name)
+            self._policy.ensure_allowed(agent, call, context)
         except ValueError as exc:
             return ToolResult(
                 tool_call_id=call.id,

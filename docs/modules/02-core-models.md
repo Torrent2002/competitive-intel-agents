@@ -136,6 +136,7 @@ Required shared models:
 - `tool_calls`
 - `output_artifact_ids`
 - `signals`
+- `review_feedback`
 - `message`
 - `error`
 
@@ -226,7 +227,13 @@ Required shared models:
 - Every round event should include `run_id`, `agent`, `round`, `decision`, and `timestamp`.
 - Claims should carry `source_ids`.
 - Review feedback should carry `issue`, `target_agent`, `target_artifact_id`, and `required_action`.
-- Reworked artifacts should not overwrite old artifacts in place. Use `status`, `version`, and `supersedes_id`.
+- Reviewer round output carries structured feedback in `AgentRoundResult.review_feedback`, so the rework loop can route work without parsing natural language.
+- Reworked artifacts must not overwrite old artifacts in place. Create a new artifact id, increment `version`, and set `supersedes_id` to the old artifact id.
+- Artifact ids are immutable once saved. A duplicate artifact id is a contract error, not an upsert.
+- Artifact status must be observed consistently by downstream modules. If a store marks an artifact `superseded` or `rejected`, returned model objects must expose that current `status`.
+- A replacement artifact must stay inside the same `run_id` and artifact type as the artifact it supersedes.
+- `AgentProfile.allowed_tools` is the per-run effective tool allowlist. It may narrow the role's maximum tool permissions, but must not grant tools outside the role boundary.
+- A `ToolCall.requested_by` value is part of provenance. Runtime execution must reject calls whose `requested_by` does not match the executing agent.
 - Phase 1 provenance means factual claims carry source ids. Full causal-chain replay can be implemented later.
 
 ## Tests
@@ -238,6 +245,7 @@ Required shared models:
 - Validate artifact status and version fields.
 - Validate agent profile budget and allowed tool fields.
 - Validate JSON serialization and deserialization.
+- Validate `AgentRoundResult` round-trips nested `ReviewFeedback`.
 
 ## Done Criteria
 

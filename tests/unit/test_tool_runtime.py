@@ -2,10 +2,16 @@
 
 import pytest
 
-from competitive_intel_agents.models import ToolCall
+from competitive_intel_agents.models import (
+    AgentProfile,
+    CompetitiveIntelRequest,
+    RunContext,
+    ToolCall,
+)
 from competitive_intel_agents.runtime.tool_runtime import (
     FakeWebFetch,
     FakeWebSearch,
+    ToolPolicy,
     ToolRuntime,
 )
 
@@ -21,6 +27,20 @@ def make_tool_call(
         name=name,
         args=args or {"query": "competitor market share"},
         requested_by=requested_by,
+    )
+
+
+def make_context(allowed_tools: list[str]) -> RunContext:
+    return RunContext(
+        run_id="run_001",
+        request=CompetitiveIntelRequest(company="ACME"),
+        agent_profiles={
+            "collector": AgentProfile(
+                agent="collector",
+                max_rounds=3,
+                allowed_tools=allowed_tools,
+            )
+        },
     )
 
 
@@ -66,6 +86,61 @@ def test_reject_disallowed_tool() -> None:
     assert result.error is not None
     assert "not allowed" in result.error.lower()
     assert result.data == {}
+
+
+def test_rejects_tool_call_requested_by_another_agent() -> None:
+    """A call attributed to one agent cannot be executed as another agent."""
+    runtime = ToolRuntime()
+    runtime.register(FakeWebSearch())
+    call = make_tool_call("tc_identity", "web_search", requested_by="analyst")
+
+    result = runtime.execute("collector", call)
+
+    assert result.ok is False
+    assert result.error is not None
+    assert "requested_by" in result.error
+    assert result.data == {}
+
+
+def test_profile_allowed_tools_can_narrow_static_role_permissions() -> None:
+    """Run profiles are effective permissions and may remove role-default tools."""
+    runtime = ToolRuntime(policy=ToolPolicy())
+    runtime.register(FakeWebSearch())
+    runtime.register(FakeWebFetch())
+
+    search = make_tool_call("tc_search", "web_search", {"query": "ACME"})
+    fetch = make_tool_call("tc_fetch", "web_fetch", {"url": "https://example.com"})
+    context = make_context(allowed_tools=["web_fetch"])
+
+    search_result = runtime.execute("collector", search, context=context)
+    fetch_result = runtime.execute("collector", fetch, context=context)
+
+    assert search_result.ok is False
+    assert "not allowed" in search_result.error.lower()
+    assert fetch_result.ok is True
+
+
+def test_profile_allowed_tools_cannot_exceed_static_role_permissions() -> None:
+    """Run profiles cannot grant tools outside the agent's role ceiling."""
+    runtime = ToolRuntime(policy=ToolPolicy())
+    runtime.register(FakeWebSearch())
+    context = RunContext(
+        run_id="run_001",
+        request=CompetitiveIntelRequest(company="ACME"),
+        agent_profiles={
+            "analyst": AgentProfile(
+                agent="analyst",
+                max_rounds=3,
+                allowed_tools=["web_search"],
+            )
+        },
+    )
+    call = make_tool_call("tc_analyst", "web_search", requested_by="analyst")
+
+    result = runtime.execute("analyst", call, context=context)
+
+    assert result.ok is False
+    assert "not allowed" in result.error.lower()
 
 
 def test_reject_unregistered_tool() -> None:

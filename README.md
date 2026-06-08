@@ -1,22 +1,45 @@
 # Competitive Intel Agents
 
-AI-powered competitive analysis multi-agent collaboration system — **auditable, observable, resilient by design**.
+Evidence-first competitive intelligence workflow — **auditable, source-backed, role-bounded, and replayable by design**.
 
-> Not just "4 LLMs chained together." Every conclusion must have a provenance chain. Every agent decision must be replayable. The system must detect when an agent is stuck and recover autonomously.
+> This project is not trying to prove that four agents are magically smarter than one agent. A single agent can search, analyze, and write a report. The point here is different: turn competitive analysis into a controlled production workflow where every claim has evidence, every intermediate artifact is inspectable, every rejection can trigger bounded rework, and every run can be replayed.
 
 ## Design Philosophy (Why This Is Not Just Another Multi-Agent Demo)
 
 | What Everyone Else Does | What This Project Does |
 |---|---|
-| Chain LLM calls, output a report | **Journal every agent decision** → full causal provenance chain |
-| "The report looks good" | **Structured quality verification** with automated rework loop |
-| Ignore agent failures | **Per-agent stall detection + circuit breaker + checkpoint recovery** |
-| No regression testing | **Golden case replay** — same inputs, compare outputs, detect degradation |
-| Logs maybe | **Per-agent observability dashboard** — rounds, tokens, tool calls, health |
+| Let one agent search, reason, and write | **Role-bounded workflow**: Collector gathers sources, Analyst writes sourced claims, Writer drafts, Reviewer checks |
+| Trust the final prose | **Evidence-first artifacts**: final report claims must trace to `source_ids` |
+| Ask the same agent to review itself | **Independent reviewer feedback** routed back to the responsible stage |
+| Rerun the whole prompt when something is wrong | **Bounded rework**: replace only the stale artifact and rerun downstream stages |
+| Keep ad hoc logs | **Replayable journal**: every round has decision, tool calls, signals, and artifact ids |
+| Compare exact generated text | **Golden replay metrics**: source coverage, schema completeness, rejections, rounds, tool calls |
 
 These design choices come from real-world Agent Infra experience (Astra engine open-source contributions), ported here as a standalone system.
 
 ---
+
+## Why Multi-Agent Here?
+
+The value of this project is not "more agents means more intelligence." The value is engineering control.
+
+A single agent can produce a competitive report, but it tends to blur responsibilities: it can fetch evidence, infer claims, write narrative, and judge quality in one opaque chain. That makes it hard to answer practical questions:
+
+- Which source supports this claim?
+- Did the writer invent facts that the collector never found?
+- Can we fix one unsupported claim without rerunning the whole report?
+- Did this change make our source coverage worse?
+- Why did the system retry, abort, or ask for rework?
+
+This system makes those questions first-class:
+
+- `SourceArtifact` records what was collected.
+- `AnalysisClaim` must carry `source_ids`.
+- `ReportDraft` is built from claims, not raw hidden context.
+- `ReviewFeedback` targets a specific agent and artifact.
+- `RoundEvent` records each agent decision for audit and replay.
+
+In other words: the agent runtime is the engine; this project is the domain-specific production line around it.
 
 ## Architecture
 
@@ -25,9 +48,9 @@ User Input (company name / product)
         │
         ▼
 ┌─────────────────────────────────────────────────┐
-│              Orchestrator                         │
-│   Task decomposition → DAG → Agent profiles      │
-│   Assigns: budget, tools, strategy per agent      │
+│              Orchestrator                       │
+│   Builds run context, stores, profiles, DAG      │
+│   Enforces role sequence and rework boundaries   │
 └────────────────────┬────────────────────────────┘
                      │
      ┌───────────────┼───────────────┐
@@ -36,25 +59,22 @@ User Input (company name / product)
 │ Collector │   │ Analyst  │   │  Writer  │
 │  Agent    │   │  Agent   │   │  Agent   │
 ├──────────┤   ├──────────┤   ├──────────┤
-│ Role:    │   │ Role:    │   │ Role:    │
-│ search + │   │ compare +│   │ struct-  │
-│ scrape   │   │ insights │   │ ured     │
-│          │   │          │   │ report   │
-│ Tools:   │   │ Tools:   │   │ Tools:   │
-│ web_search│  │ all read │   │ all read │
-│ web_fetch│   │          │   │          │
+│ Writes:  │   │ Writes:  │   │ Writes:  │
+│ Source-  │   │ sourced  │   │ report   │
+│ Artifact │   │ claims   │   │ draft    │
 │          │   │          │   │          │
-│ Budget:  │   │ Budget:  │   │ Budget:  │
-│ 10 rounds│   │ 15 rounds│   │ 8 rounds │
+│ Tools:   │   │ Tools:   │   │ Tools:   │
+│ search + │   │ none     │   │ none     │
+│ fetch    │   │          │   │          │
 └────┬─────┘   └────┬─────┘   └────┬─────┘
      │              │              │
      └──────────────┼──────────────┘
                     ▼
 ┌─────────────────────────────────────────────────┐
 │           Quality Reviewer Agent                 │
-│   Fact-check: claim vs source → approve/reject   │
-│   Logic-check: conclusion follows from evidence? │
-│   Reject → structured feedback → auto rework     │
+│   Checks claim source coverage and report shape  │
+│   Rejects with target agent + artifact id        │
+│   Feedback drives bounded downstream rework      │
 └────────────────────┬────────────────────────────┘
                      │
               ┌──────┴──────┐
@@ -62,7 +82,7 @@ User Input (company name / product)
            Approve        Reject → Return to source agent
               │
               ▼
-     Final Report Output
+     Source-backed Final Report
 ```
 
 ---
@@ -102,7 +122,8 @@ The first implementation keeps the harness intentionally small. The goal is to m
 3. Append one journal event per round.
 4. Track tool calls and trip a circuit breaker on repeated identical calls.
 5. Save a lightweight checkpoint after each successful round.
-6. Return a simple decision: `continue`, `stop`, `retry`, `rework`, or `abort`.
+6. Pass tool results into the next round through agent memory.
+7. Return a simple decision: `continue`, `stop`, `retry`, `rework`, or `abort`.
 
 Minimal round event:
 
@@ -155,7 +176,7 @@ Report claim: "Competitor X has 35% market share in APAC"
 }
 ```
 
-In Phase 1, every factual claim should carry source ids. In later phases, each source id is expanded into a full `causal_chain` back through the journal events that created it. No final factual claim should be emitted without source references.
+In Phase 1, every factual claim must carry source ids. In later phases, each source id is expanded into a full `causal_chain` back through the journal events that created it. No final factual claim should be emitted without source references.
 
 ---
 
@@ -253,7 +274,7 @@ For incremental implementation, see the [Spec Coding Plan](docs/SPEC_CODING_PLAN
 
 ## Project Status
 
-**Phase 1 (current)**: Core pipeline + minimal harness — single agent loop, basic 4-agent orchestration, end-to-end flow, round journaling, budget checks, repeated-tool circuit breaker.
+**Phase 1 (current)**: Role-bounded artifact pipeline — source collection, sourced claims, structured draft, reviewer gate, round journaling, budget checks, repeated-tool circuit breaker.
 
 **Phase 2**: Reliability layer — stronger stall detection, checkpoint recovery per agent, retry policies.
 
