@@ -28,7 +28,11 @@ def make_context(run_id: str = "run_001") -> RunContext:
     )
 
 
-def save_source(store: InMemoryArtifactStore, source_id: str = "source_001") -> None:
+def save_source(
+    store: InMemoryArtifactStore,
+    source_id: str = "source_001",
+    entity: str | None = "Acme",
+) -> None:
     store.save_source(
         SourceArtifact(
             id=source_id,
@@ -36,6 +40,7 @@ def save_source(store: InMemoryArtifactStore, source_id: str = "source_001") -> 
             url=f"https://example.com/{source_id}",
             title="Example source",
             snippet="Evidence snippet.",
+            metadata={"entity": entity} if entity else {},
         )
     )
 
@@ -83,9 +88,16 @@ def save_report(
 
 def test_reviewer_approves_fully_sourced_report() -> None:
     store = InMemoryArtifactStore()
-    save_source(store)
-    save_claim(store)
-    save_report(store)
+    save_source(store, "source_001", entity="Acme")
+    save_source(store, "source_002", entity="Beta")
+    save_source(store, "source_003", entity="Acme")
+    save_claim(store, "claim_001", source_ids=["source_001"])
+    save_claim(store, "claim_002", source_ids=["source_002"])
+    save_report(
+        store,
+        claim_ids=["claim_001", "claim_002"],
+        source_ids=["source_001", "source_002"],
+    )
 
     result = ReviewerAgent(store).run_round(make_context(), AgentState(agent="reviewer"))
 
@@ -94,6 +106,86 @@ def test_reviewer_approves_fully_sourced_report() -> None:
     assert result.output_artifact_ids == ["report_run_001_001"]
     assert result.tool_calls == []
     assert result.review_feedback == []
+
+
+def test_reviewer_rejects_competitive_report_with_too_few_sources() -> None:
+    store = InMemoryArtifactStore()
+    save_source(store, "source_001", entity="Acme")
+    save_source(store, "source_002", entity="Beta")
+    save_claim(store, source_ids=["source_001"])
+    save_report(store, source_ids=["source_001"])
+
+    result = ReviewerAgent(store).run_round(make_context(), AgentState(agent="reviewer"))
+
+    assert result.completed is False
+    assert result.signals == ["rework_required"]
+    assert any(
+        item.issue == "missing_source" and item.target_agent == "collector"
+        for item in result.review_feedback
+    )
+
+
+def test_reviewer_rejects_missing_competitor_source() -> None:
+    store = InMemoryArtifactStore()
+    save_source(store, "source_001", entity="Acme")
+    save_source(store, "source_002", entity="Acme")
+    save_source(store, "source_003", entity="Acme")
+    save_claim(store, source_ids=["source_001"])
+    save_report(store, source_ids=["source_001"])
+
+    result = ReviewerAgent(store).run_round(make_context(), AgentState(agent="reviewer"))
+
+    assert result.completed is False
+    feedback = result.review_feedback[0]
+    assert feedback.issue == "missing_source"
+    assert feedback.target_agent == "collector"
+    assert "Beta" in feedback.message
+
+
+def test_reviewer_does_not_count_synthetic_rework_source_as_competitor_coverage() -> None:
+    store = InMemoryArtifactStore()
+    save_source(store, "source_001", entity="Acme")
+    save_source(store, "source_002", entity="Acme")
+    store.save_source(
+        SourceArtifact(
+            id="collector_coverage_v1",
+            run_id="run_001",
+            url="https://rework.local/collector_coverage",
+            title="Rework source for collector_coverage",
+            snippet="Collect more sources for Beta.",
+        )
+    )
+    save_claim(store, source_ids=["source_001"])
+    save_report(store, source_ids=["source_001"])
+
+    result = ReviewerAgent(store).run_round(make_context(), AgentState(agent="reviewer"))
+
+    assert result.completed is False
+    assert any(
+        item.issue == "missing_source"
+        and item.target_agent == "collector"
+        and "Beta" in item.message
+        for item in result.review_feedback
+    )
+
+
+def test_reviewer_rejects_competitor_source_without_competitor_claim() -> None:
+    store = InMemoryArtifactStore()
+    save_source(store, "source_001", entity="Acme")
+    save_source(store, "source_002", entity="Beta")
+    save_source(store, "source_003", entity="Acme")
+    save_claim(store, source_ids=["source_001"])
+    save_report(store, source_ids=["source_001"])
+
+    result = ReviewerAgent(store).run_round(make_context(), AgentState(agent="reviewer"))
+
+    assert result.completed is False
+    assert any(
+        item.issue == "unsupported_claim"
+        and item.target_agent == "analyst"
+        and "Beta" in item.message
+        for item in result.review_feedback
+    )
 
 
 def test_reviewer_rejects_missing_sections_with_writer_feedback() -> None:
@@ -162,9 +254,16 @@ def test_reviewer_rejects_report_source_ids_not_covered_by_claims() -> None:
 
 def test_reviewer_can_run_through_harness_without_tools() -> None:
     store = InMemoryArtifactStore()
-    save_source(store)
-    save_claim(store)
-    save_report(store)
+    save_source(store, "source_001", entity="Acme")
+    save_source(store, "source_002", entity="Beta")
+    save_source(store, "source_003", entity="Acme")
+    save_claim(store, "claim_001", source_ids=["source_001"])
+    save_claim(store, "claim_002", source_ids=["source_002"])
+    save_report(
+        store,
+        claim_ids=["claim_001", "claim_002"],
+        source_ids=["source_001", "source_002"],
+    )
     context = make_context()
     harness = RuntimeHarness(
         InMemoryJournalStore(),

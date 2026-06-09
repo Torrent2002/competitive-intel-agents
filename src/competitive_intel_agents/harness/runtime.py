@@ -208,6 +208,13 @@ class RuntimeHarness:
         if has_error and made_progress and not is_budget_final_round:
             signals.append("partial_tool_error_tolerated")
             return "continue"
+        if (
+            has_error
+            and "alternate_fetch_after_error" in signals
+            and not is_budget_final_round
+        ):
+            signals.append("alternate_tool_error_tolerated")
+            return "continue"
         if has_error or "stalled_round" in signals:
             reason = self._retry_reason(has_error, signals)
             if self._retry_exhausted(run_id, agent, reason):

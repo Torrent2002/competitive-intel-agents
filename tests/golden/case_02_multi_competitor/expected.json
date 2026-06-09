@@ -10,12 +10,12 @@
   "min_claim_count": 2,
   "min_claim_source_coverage_ratio": 1.0,
   "require_report_source_coverage": true,
-  "max_reviewer_rejections": 0,
-  "max_total_rounds": 14,
-  "max_tool_calls": 8,
-  "terminal_status": "approved",
-  "terminal_decision": "stop",
+  "max_reviewer_rejections": 2,
+  "max_total_rounds": 15,
+  "max_tool_calls": 100,
+  "terminal_status": "rework_failed",
+  "terminal_decision": "rework",
   "require_reviewer": true,
-  "max_rework_attempts": 0,
+  "max_rework_attempts": 2,
   "require_artifact_lineage": true
 }

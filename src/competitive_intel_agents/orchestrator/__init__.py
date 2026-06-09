@@ -20,6 +20,7 @@ from competitive_intel_agents.models import (
     AgentName,
     AgentProfile,
     CompetitiveIntelRequest,
+    ReviewFeedback,
     RunContext,
     RunResult,
 )
@@ -91,6 +92,17 @@ class Orchestrator:
                     report_id=self._latest_report_id(context.run_id),
                     review_feedback=result.review_feedback,
                 )
+            if agent.name == "analyst":
+                feedback = self._collector_coverage_feedback(context)
+                if feedback:
+                    if self._enable_rework:
+                        return self._apply_integrated_rework(context, [feedback])
+                    return RunResult(
+                        run_id=context.run_id,
+                        status="needs_rework",
+                        report_id=self._latest_report_id(context.run_id),
+                        review_feedback=[feedback],
+                    )
 
         return RunResult(
             run_id=context.run_id,
@@ -162,6 +174,55 @@ class Orchestrator:
         if report is None:
             return None
         return report.id
+
+    def _collector_coverage_feedback(
+        self,
+        context: RunContext,
+    ) -> ReviewFeedback | None:
+        latest_collector = self.journal.list_agent_events(
+            context.run_id,
+            "collector",
+        )[-1:]
+        if not latest_collector or "coverage_partial" not in latest_collector[0].signals:
+            return None
+
+        missing = self._missing_source_entities(context)
+        if missing:
+            missing_text = ", ".join(missing)
+            message = (
+                "Analyst cannot complete a balanced competitive analysis because "
+                f"collector coverage is partial for: {missing_text}."
+            )
+            action = (
+                "Collect additional official, product, pricing, and comparison "
+                f"sources for: {missing_text}."
+            )
+        else:
+            message = (
+                "Analyst cannot complete a balanced competitive analysis because "
+                "collector coverage is partial."
+            )
+            action = (
+                "Collect additional sources covering the requested company, "
+                "competitors, and key comparison dimensions before writing."
+            )
+
+        return ReviewFeedback(
+            issue="missing_source",
+            target_agent="collector",
+            target_artifact_id="collector_coverage",
+            message=message,
+            required_action=action,
+        )
+
+    def _missing_source_entities(self, context: RunContext) -> list[str]:
+        covered = {
+            source.metadata.get("entity")
+            for source in self.artifacts.list_sources(context.run_id)
+            if isinstance(source.metadata.get("entity"), str)
+        }
+        required = [context.request.company, *context.request.competitors]
+        return [entity for entity in required if entity not in covered]
 
     @staticmethod
     def _default_harness(journal: JournalStore) -> RuntimeHarness:

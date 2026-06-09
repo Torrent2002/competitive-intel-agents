@@ -161,19 +161,21 @@ class ReworkLoop:
 
     def _run_route(self, context: RunContext, route: list[AgentName]) -> str | None:
         final_decision: str | None = None
-        agents = self._build_agents()
         for agent_name in route:
-            result = self._harness.run_agent(context, agents[agent_name])
+            result = self._harness.run_agent(context, self._build_agent(context, agent_name))
             final_decision = result.decision
         return final_decision
 
-    def _build_agents(self) -> dict[AgentName, Agent]:
-        return {
-            "collector": CollectorAgent(self._artifacts),
-            "analyst": AnalystAgent(self._artifacts),
-            "writer": WriterAgent(self._artifacts),
-            "reviewer": ReviewerAgent(self._artifacts),
-        }
+    def _build_agent(self, context: RunContext, agent_name: AgentName) -> Agent:
+        if agent_name == "collector":
+            existing_sources = self._artifacts.list_sources(context.run_id)
+            target_sources = max(2, len(existing_sources) + 2)
+            return CollectorAgent(self._artifacts, target_sources=target_sources)
+        if agent_name == "analyst":
+            return AnalystAgent(self._artifacts)
+        if agent_name == "writer":
+            return WriterAgent(self._artifacts)
+        return ReviewerAgent(self._artifacts)
 
     @staticmethod
     def _replacement_id(artifact_id: str, version: int) -> str:

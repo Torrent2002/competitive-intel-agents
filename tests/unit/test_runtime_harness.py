@@ -132,6 +132,23 @@ class ProgressWithFailingToolAgent(BaseAgent):
         )
 
 
+class AlternateFetchAfterErrorAgent(BaseAgent):
+    name = "collector"
+
+    def run_round(self, context: RunContext, state: AgentState) -> AgentRoundResult:
+        return AgentRoundResult(
+            tool_calls=[
+                ToolCall(
+                    id=f"tool_missing_{state.round}",
+                    name="missing_tool",
+                    args={},
+                    requested_by="collector",
+                )
+            ],
+            signals=["alternate_fetch_after_error"],
+        )
+
+
 class ReworkAgent(BaseAgent):
     name = "reviewer"
 
@@ -246,6 +263,55 @@ def test_run_round_continues_when_tool_errors_are_partial_and_progress_exists() 
     assert event.decision == "continue"
     assert event.output_artifact_ids == ["source_1"]
     assert "tool_error:tool_missing_1" in event.signals
+    assert journal.list_run_events("run_001") == [event]
+
+
+def test_final_round_stops_when_agent_completed_with_partial_tool_errors() -> None:
+    class CompletedWithFailingToolAgent(BaseAgent):
+        name = "collector"
+
+        def run_round(self, context: RunContext, state: AgentState) -> AgentRoundResult:
+            return AgentRoundResult(
+                completed=True,
+                output_artifact_ids=["source_partial"],
+                tool_calls=[
+                    ToolCall(
+                        id="tool_missing_final",
+                        name="missing_tool",
+                        args={},
+                        requested_by="collector",
+                    )
+                ],
+                signals=["coverage_partial"],
+            )
+
+    harness, journal, _ = make_harness()
+
+    event = harness.run_round(
+        make_context(allowed_tools=["web_search"]),
+        CompletedWithFailingToolAgent(),
+        round_index=3,
+        is_budget_final_round=True,
+    )
+
+    assert event.decision == "stop"
+    assert "tool_error:tool_missing_final" in event.signals
+    assert "coverage_partial" in event.signals
+    assert journal.list_run_events("run_001") == [event]
+
+
+def test_run_round_continues_when_agent_has_alternate_fetches_after_errors() -> None:
+    harness, journal, _ = make_harness()
+
+    event = harness.run_round(
+        make_context(allowed_tools=["web_search"]),
+        AlternateFetchAfterErrorAgent(),
+        round_index=1,
+    )
+
+    assert event.decision == "continue"
+    assert "tool_error:tool_missing_1" in event.signals
+    assert "alternate_fetch_after_error" in event.signals
     assert journal.list_run_events("run_001") == [event]
 
 

@@ -5,6 +5,7 @@ from competitive_intel_agents.journal import InMemoryJournalStore
 from competitive_intel_agents.models import (
     AgentProfile,
     AgentState,
+    AnalysisClaim,
     CompetitiveIntelRequest,
     RunContext,
     SourceArtifact,
@@ -31,12 +32,31 @@ def make_context(max_rounds: int = 2) -> RunContext:
     )
 
 
+def make_single_company_context(max_rounds: int = 2) -> RunContext:
+    return RunContext(
+        run_id="run_001",
+        request=CompetitiveIntelRequest(
+            company="ACME",
+            market="collaboration software",
+            questions=["pricing"],
+        ),
+        agent_profiles={
+            "analyst": AgentProfile(
+                agent="analyst",
+                max_rounds=max_rounds,
+                allowed_tools=[],
+            )
+        },
+    )
+
+
 def save_source(
     store: InMemoryArtifactStore,
     source_id: str,
     url: str = "https://example.com/source",
     title: str = "ACME source",
     snippet: str = "ACME has a strong collaboration workflow.",
+    entity: str | None = None,
 ) -> None:
     store.save_source(
         SourceArtifact(
@@ -45,6 +65,7 @@ def save_source(
             url=url,
             title=title,
             snippet=snippet,
+            metadata={"entity": entity} if entity else {},
         )
     )
 
@@ -105,7 +126,7 @@ def test_analyst_does_not_duplicate_existing_claim_for_same_source() -> None:
     store = InMemoryArtifactStore()
     save_source(store, "source_001")
     analyst = AnalystAgent(store, target_claims=1)
-    context = make_context()
+    context = make_single_company_context()
 
     first = analyst.run_round(context, AgentState(agent="analyst", round=1))
     second = analyst.run_round(context, AgentState(agent="analyst", round=2))
@@ -116,13 +137,64 @@ def test_analyst_does_not_duplicate_existing_claim_for_same_source() -> None:
     assert len(store.list_claims("run_001")) == 1
 
 
+def test_analyst_adds_claim_for_unclaimed_competitor_source() -> None:
+    store = InMemoryArtifactStore()
+    save_source(store, "source_001", entity="ACME")
+    save_source(
+        store,
+        "source_002",
+        title="Globex source",
+        snippet="Globex has competitor evidence.",
+        entity="Globex",
+    )
+    store.save_claim(
+        AnalysisClaim(
+            id="claim_run_001_001",
+            run_id="run_001",
+            text="ACME has sourced evidence.",
+            source_ids=["source_001"],
+        )
+    )
+    analyst = AnalystAgent(store, target_claims=1)
+
+    result = analyst.run_round(make_context(), AgentState(agent="analyst", round=2))
+
+    assert result.completed is True
+    assert result.output_artifact_ids == ["claim_run_001_002"]
+    assert store.list_claims("run_001")[-1].source_ids == ["source_002"]
+
+
+def test_analyst_prioritizes_required_entity_sources_before_filler_sources() -> None:
+    store = InMemoryArtifactStore()
+    save_source(store, "source_001", entity="ACME")
+    save_source(store, "source_002", entity="ACME")
+    save_source(store, "source_003", entity=None)
+    save_source(
+        store,
+        "source_004",
+        title="Globex source",
+        snippet="Globex competitor evidence.",
+        entity="Globex",
+    )
+    analyst = AnalystAgent(store, target_claims=2)
+
+    result = analyst.run_round(make_context(), AgentState(agent="analyst", round=1))
+
+    assert result.completed is True
+    assert "source_004" in {
+        source_id
+        for claim in store.list_claims("run_001")
+        for source_id in claim.source_ids
+    }
+
+
 def test_analyst_can_run_through_harness_without_tools() -> None:
     store = InMemoryArtifactStore()
     save_source(store, "source_001")
     analyst = AnalystAgent(store, target_claims=1)
     harness = RuntimeHarness(InMemoryJournalStore(), ToolRuntime())
 
-    result = harness.run_agent(make_context(max_rounds=2), analyst)
+    result = harness.run_agent(make_single_company_context(max_rounds=2), analyst)
 
     assert result.decision == "stop"
     assert result.output_artifact_ids == ["claim_run_001_001"]

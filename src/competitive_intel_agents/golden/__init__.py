@@ -104,7 +104,10 @@ class GoldenReplayRunner:
         return GoldenReplaySummary(total_cases=len(results), results=results)
 
     def run_case(self, case: GoldenCase) -> GoldenCaseResult:
-        orchestrator = Orchestrator(run_id_factory=lambda: f"golden_{case.name}")
+        orchestrator = Orchestrator(
+            enable_rework=True,
+            run_id_factory=lambda: f"golden_{case.name}",
+        )
         run_result = orchestrator.run(case.request)
         return evaluate_golden_metrics(
             orchestrator.journal,

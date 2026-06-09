@@ -39,6 +39,7 @@ class CollectorAgent(BaseAgent):
         self._queried_urls: set[str] = set()
         self._pending_urls: list[dict] = []  # {url, title, snippet}
         self._fetch_attempts: dict[str, int] = {}  # url -> attempt count
+        self._attempted_coverage_slots: set[str] = set()
 
     def run_round(self, context: RunContext, state: AgentState) -> AgentRoundResult:
         existing = self._artifacts.list_sources(context.run_id)
@@ -70,7 +71,10 @@ class CollectorAgent(BaseAgent):
             self._queried_urls = {s.url for s in existing}
             return AgentRoundResult(
                 tool_calls=calls,
-                signals=[f"search_x{len(calls)}"],
+                signals=[
+                    f"search_x{len(calls)}",
+                    *self._attempt_signals_for_queries(queries),
+                ],
             )
 
         # --- Phase 2: Got search results → extract URLs to fetch ---
@@ -94,11 +98,35 @@ class CollectorAgent(BaseAgent):
                     tool_calls=calls,
                     signals=["fetch_x{}".format(len(calls))],
                 )
+        elif self._only_empty_search_results(tool_results):
+            fallback_urls = self._direct_url_fallbacks(context)
+            if fallback_urls:
+                batch = fallback_urls[:5]
+                self._mark_fetch_scheduled(batch)
+                calls = [
+                    ToolCall(
+                        id=f"collector_direct_fetch_{state.round}_{j+1}",
+                        name="web_fetch",
+                        args={"url": u["url"]},
+                        requested_by=self.name,
+                    )
+                    for j, u in enumerate(batch)
+                ]
+                self._pending_urls = fallback_urls[5:]
+                return AgentRoundResult(
+                    tool_calls=calls,
+                    signals=[
+                        "direct_url_fallback",
+                        f"fetch_x{len(calls)}",
+                        *self._attempt_signals_for_urls(batch),
+                    ],
+                )
 
         # --- Phase 3: Got fetch results → filter and save ---
         if tool_results:
             saved = self._filter_and_save(context, tool_results)
             now = self._artifacts.list_sources(context.run_id)
+            had_tool_errors = any(not result.ok for result in tool_results)
 
             if saved:
                 print(
@@ -125,7 +153,7 @@ class CollectorAgent(BaseAgent):
                 return AgentRoundResult(
                     tool_calls=calls,
                     output_artifact_ids=saved,
-                    signals=[f"fetch_x{len(calls)}"],
+                    signals=self._fetch_signals(len(calls), had_tool_errors),
                 )
 
             # Not enough sources → generate refined queries
@@ -154,7 +182,11 @@ class CollectorAgent(BaseAgent):
                     return AgentRoundResult(
                         tool_calls=calls,
                         output_artifact_ids=saved,
-                        signals=["search_refined", "coverage_incomplete"],
+                        signals=[
+                            "search_refined",
+                            "coverage_incomplete",
+                            *self._attempt_signals_for_queries(refined),
+                        ],
                     )
 
             completed = self._collection_complete(context, now)
@@ -163,7 +195,7 @@ class CollectorAgent(BaseAgent):
             return AgentRoundResult(
                 completed=completed,
                 output_artifact_ids=saved,
-                signals=self._save_signals(saved, completed),
+                signals=self._save_signals(context, now, saved, completed),
             )
 
         # No search results, no fetch results, no sources
@@ -459,6 +491,77 @@ class CollectorAgent(BaseAgent):
                         all_results.append(enriched)
         return all_results
 
+    @staticmethod
+    def _only_empty_search_results(tool_results: list[ToolResult]) -> bool:
+        saw_search_result = False
+        for tr in tool_results:
+            if not tr.ok:
+                continue
+            if "results" not in tr.data:
+                continue
+            saw_search_result = True
+            results = tr.data.get("results", [])
+            if isinstance(results, list) and results:
+                return False
+        return saw_search_result
+
+    def _direct_url_fallbacks(self, context: RunContext) -> list[dict]:
+        urls: list[dict] = []
+        seen: set[str] = set()
+        candidate_groups = [
+            (entity, role, self._official_url_candidates(entity))
+            for entity, role in self._required_entities(context)
+        ]
+        max_candidates = max((len(group[2]) for group in candidate_groups), default=0)
+        for index in range(max_candidates):
+            for entity, role, candidates in candidate_groups:
+                if index >= len(candidates):
+                    continue
+                url = candidates[index]
+                if url in self._queried_urls or url in seen:
+                    continue
+                seen.add(url)
+                urls.append(
+                    {
+                        "url": url,
+                        "title": f"{entity} official candidate",
+                        "snippet": "",
+                        "metadata": {
+                            "entity": entity,
+                            "entity_role": role,
+                            "dimension": "official",
+                            "source_type": "official",
+                            "is_official": True,
+                            "discovery": "direct_url_fallback",
+                        },
+                    }
+                )
+        return urls
+
+    @staticmethod
+    def _official_url_candidates(entity: str) -> list[str]:
+        slug = CollectorAgent._domain_slug(entity)
+        if not slug:
+            return []
+        return [
+            f"https://www.{slug}.com",
+            f"https://{slug}.com",
+            f"https://www.{slug}.cn",
+            f"https://{slug}.cn",
+            f"https://www.{slug}.io",
+            f"https://{slug}.io",
+            f"https://docs.{slug}.com",
+            f"https://docs.{slug}.cn",
+            f"https://docs.{slug}.io",
+        ]
+
+    @staticmethod
+    def _domain_slug(entity: str) -> str:
+        import re
+
+        slug = re.sub(r"[^a-z0-9-]+", "", entity.strip().lower())
+        return slug.strip("-")
+
     def _select_urls(self, results: list[dict], count: int) -> list[dict]:
         """Select best URLs: dedup, prefer unique domains, drop already-seen."""
         selected: list[dict] = []
@@ -666,12 +769,25 @@ class CollectorAgent(BaseAgent):
         context: RunContext,
         sources: list[SourceArtifact],
     ) -> bool:
-        if len(sources) < self._effective_target_sources(context):
+        if not self._coverage_attempts_complete(context):
             return False
+        if len(sources) >= self._target_sources:
+            return True
         covered = self._covered_entities(sources)
         if not covered:
-            return len(sources) >= self._target_sources
+            return False
         return all(entity in covered for entity, _ in self._required_entities(context))
+
+    def _coverage_attempts_complete(self, context: RunContext) -> bool:
+        required = {
+            key
+            for key in (
+                self._coverage_attempt_key(item["metadata"])
+                for item in self._coverage_query_plan(context)
+            )
+            if key
+        }
+        return required <= self._attempted_coverage_slots
 
     def _effective_target_sources(self, context: RunContext) -> int:
         return max(self._target_sources, len(self._required_entities(context)))
@@ -724,11 +840,37 @@ class CollectorAgent(BaseAgent):
                 covered.add(entity)
         return covered
 
-    @staticmethod
-    def _save_signals(saved: list[str], completed: bool) -> list[str]:
+    def _save_signals(
+        self,
+        context: RunContext,
+        sources: list[SourceArtifact],
+        saved: list[str],
+        completed: bool,
+    ) -> list[str]:
         signals = ["sources_saved"] if saved else ["no_new_sources"]
         if not completed:
             signals.append("coverage_incomplete")
+        elif self._coverage_partial(context, sources):
+            signals.append("coverage_partial")
+        return signals
+
+    def _coverage_partial(
+        self,
+        context: RunContext,
+        sources: list[SourceArtifact],
+    ) -> bool:
+        covered = self._covered_entities(sources)
+        if not covered:
+            return bool(context.request.competitors)
+        return any(
+            entity not in covered for entity, _ in self._required_entities(context)
+        )
+
+    @staticmethod
+    def _fetch_signals(fetch_count: int, had_tool_errors: bool) -> list[str]:
+        signals = [f"fetch_x{fetch_count}"]
+        if had_tool_errors:
+            signals.append("alternate_fetch_after_error")
         return signals
 
     @staticmethod
@@ -749,6 +891,7 @@ class CollectorAgent(BaseAgent):
         self._queried_urls = set()
         self._pending_urls = []
         self._fetch_attempts = {}
+        self._attempted_coverage_slots = set()
 
     def _mark_fetch_scheduled(self, urls: list[dict]) -> None:
         for item in urls:
@@ -762,3 +905,38 @@ class CollectorAgent(BaseAgent):
 
     def _metadata_for_url(self, url: str) -> dict:
         return dict(self._url_metadata.get(url, {}))
+
+    def _attempt_signals_for_queries(self, queries: list[str]) -> list[str]:
+        return self._attempt_signals(
+            self._metadata_for_query(query) for query in queries
+        )
+
+    def _attempt_signals_for_urls(self, urls: list[dict]) -> list[str]:
+        return self._attempt_signals(
+            dict(item.get("metadata", {})) for item in urls
+        )
+
+    def _attempt_signals(self, metadata_items) -> list[str]:
+        signals: list[str] = []
+        seen: set[str] = set()
+        for metadata in metadata_items:
+            key = CollectorAgent._coverage_attempt_key(metadata)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            self._attempted_coverage_slots.add(key)
+            signals.append(f"attempted:{key}")
+        return signals
+
+    @staticmethod
+    def _coverage_attempt_key(metadata: dict) -> str | None:
+        entity = metadata.get("entity")
+        dimension = metadata.get("dimension")
+        if not isinstance(entity, str) or not entity:
+            return None
+        if not isinstance(dimension, str) or not dimension:
+            return None
+        competitor = metadata.get("competitor")
+        if isinstance(competitor, str) and competitor:
+            return f"{entity}:{dimension}:{competitor}"
+        return f"{entity}:{dimension}"

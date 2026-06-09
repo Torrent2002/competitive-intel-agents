@@ -14,8 +14,10 @@ from competitive_intel_agents.orchestrator import Orchestrator, load_agent_profi
 from competitive_intel_agents.provenance import build_provenance_graph
 from competitive_intel_agents.runtime.model_runtime import ConfiguredProviderFactory, ModelRuntime
 from competitive_intel_agents.runtime import (
+    BingSearch,
     CachedWebFetch,
     DuckDuckGoSearch,
+    FallbackSearch,
     ToolRuntime,
     WebFetchTool,
     WebSearchTool,
@@ -236,11 +238,22 @@ def render_run_detail(workspace: "LocalWorkspace", run_id: str) -> str | None:
     provenance_summary = (
         f"<p>Nodes: {len(provenance.nodes)}, Edges: {len(provenance.edges)}</p>"
     )
+    refresh_html = (
+        '<meta http-equiv="refresh" content="2">'
+        if result.status == "running"
+        else ""
+    )
+    running_notice_html = (
+        '<section class="panel"><p>Analysis is running. '
+        "This page refreshes every 2 seconds.</p></section>"
+        if result.status == "running"
+        else ""
+    )
 
     return (
         "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
         "<meta charset=\"utf-8\">\n"
-        f"{'<meta http-equiv=\"refresh\" content=\"2\">' if result.status == 'running' else ''}\n"
+        f"{refresh_html}\n"
         f"<title>Run {_esc(run_id)} — Competitive Intel</title>\n"
         f"{_STYLE}</head>\n<body>\n"
         f'<p class="back-link"><a href="/">&larr; Back to runs</a></p>\n'
@@ -249,7 +262,7 @@ def render_run_detail(workspace: "LocalWorkspace", run_id: str) -> str | None:
         f" | Sources: {len(sources)}"
         f" | Claims: {len(claims)}"
         f" | Tool calls: {snapshot.tool_call_count}</p>\n"
-        f"{'<section class=\"panel\"><p>Analysis is running. This page refreshes every 2 seconds.</p></section>' if result.status == 'running' else ''}"
+        f"{running_notice_html}"
         f"{_render_export_actions(run_id) if report is not None else ''}"
         f"{_render_agent_workflow(events, result.status)}"
         f"<section><h2>Report</h2>\n{report_html}</section>\n"
@@ -501,11 +514,12 @@ def _make_web_orchestrator(
             journal=workspace.journal,
             agent_profiles=load_agent_profiles(),
             model_runtime=model_runtime,
+            enable_rework=True,
             run_id_factory=(lambda: run_id) if run_id else None,
         )
 
     tools = ToolRuntime()
-    tools.register(WebSearchTool(DuckDuckGoSearch()))
+    tools.register(WebSearchTool(FallbackSearch([BingSearch(), DuckDuckGoSearch(timeout=2)])))
     tools.register(
         CachedWebFetch(
             WebFetchTool(),
@@ -518,6 +532,7 @@ def _make_web_orchestrator(
         agent_profiles=load_agent_profiles(),
         harness=RuntimeHarness(workspace.journal, tools, InMemoryCheckpointStore()),
         model_runtime=model_runtime,
+        enable_rework=True,
         run_id_factory=(lambda: run_id) if run_id else None,
     )
 
@@ -578,8 +593,12 @@ class WebDashboardHandler(BaseHTTPRequestHandler):
             return
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length).decode("utf-8", errors="replace")
+        form = parse_qs(body)
         try:
-            result = start_run_from_form(self.workspace, parse_qs(body))
+            if _truthy(form, "real_web") or _truthy(form, "real_model"):
+                result = start_run_from_form(self.workspace, form)
+            else:
+                result = create_run_from_form(self.workspace, form)
         except Exception as exc:
             self._respond_html(400, _render_error(str(exc)))
             return

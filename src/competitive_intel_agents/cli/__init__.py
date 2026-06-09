@@ -16,8 +16,10 @@ from competitive_intel_agents.journal import InMemoryJournalStore, JournalStore
 from competitive_intel_agents.models import CompetitiveIntelRequest
 from competitive_intel_agents.orchestrator import Orchestrator, load_agent_profiles
 from competitive_intel_agents.runtime import (
+    BingSearch,
     CachedWebFetch,
     DuckDuckGoSearch,
+    FallbackSearch,
     ToolRuntime,
     WebFetchTool,
     WebSearchTool,
@@ -275,17 +277,20 @@ def _make_orchestrator(
             agent_profiles=load_agent_profiles(config_path),
             harness=_real_web_harness(journal, workspace),
             model_runtime=model_runtime,
+            enable_rework=True,
         )
     if workspace is None:
         return Orchestrator(
             agent_profiles=load_agent_profiles(config_path),
             model_runtime=model_runtime,
+            enable_rework=True,
         )
     return Orchestrator(
         artifacts=workspace.artifacts,
         journal=workspace.journal,
         agent_profiles=load_agent_profiles(config_path),
         model_runtime=model_runtime,
+        enable_rework=True,
     )
 
 
@@ -298,7 +303,7 @@ def _make_model_runtime() -> ModelRuntime:
 
 def _real_web_harness(journal: JournalStore, workspace: LocalWorkspace | None):
     tools = ToolRuntime()
-    tools.register(WebSearchTool(DuckDuckGoSearch()))
+    tools.register(WebSearchTool(FallbackSearch([BingSearch(), DuckDuckGoSearch(timeout=2)])))
     fetch_tool = WebFetchTool()
     if workspace is not None:
         tools.register(

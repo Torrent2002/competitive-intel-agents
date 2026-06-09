@@ -63,7 +63,7 @@ class ReviewerAgent(BaseAgent):
         }
 
         # Always run rule-based checks (deterministic, fast, no model needed)
-        rule_feedback = self._review_report(report, claims, sources)
+        rule_feedback = self._review_report(report, claims, sources, context)
 
         # If model is available, also run deeper semantic review
         model_feedback: list[ReviewFeedback] = []
@@ -178,12 +178,14 @@ class ReviewerAgent(BaseAgent):
         report: ReportDraft,
         claims: dict[str, AnalysisClaim],
         sources: dict[str, SourceArtifact],
+        context: RunContext,
     ) -> list[ReviewFeedback]:
         feedback: list[ReviewFeedback] = []
         feedback.extend(self._missing_section_feedback(report))
         feedback.extend(self._unknown_claim_feedback(report, claims))
         feedback.extend(self._missing_source_feedback(report, claims, sources))
         feedback.extend(self._uncovered_source_feedback(report, claims))
+        feedback.extend(self._competitive_coverage_feedback(context, report, claims, sources))
         return feedback
 
     def _missing_section_feedback(
@@ -290,6 +292,93 @@ class ReviewerAgent(BaseAgent):
                 required_action="Revise analysis claims so every report source supports a claim.",
             )
         ]
+
+    @staticmethod
+    def _competitive_coverage_feedback(
+        context: RunContext,
+        report: ReportDraft,
+        claims: dict[str, AnalysisClaim],
+        sources: dict[str, SourceArtifact],
+    ) -> list[ReviewFeedback]:
+        competitors = [item for item in context.request.competitors if item]
+        if not competitors:
+            return []
+
+        feedback: list[ReviewFeedback] = []
+        min_sources = max(3, len(competitors) + 2)
+        if len(sources) < min_sources:
+            feedback.append(
+                ReviewFeedback(
+                    issue="missing_source",
+                    target_agent="collector",
+                    target_artifact_id="collector_coverage",
+                    message=(
+                        "Competitive report has too few active sources: "
+                        f"{len(sources)} found, at least {min_sources} expected."
+                    ),
+                    required_action=(
+                        "Collect more independent sources covering the product, "
+                        "competitors, and comparison dimensions before approval."
+                    ),
+                )
+            )
+
+        for competitor in competitors:
+            competitor_source_ids = {
+                source_id
+                for source_id, source in sources.items()
+                if _source_mentions_entity(source, competitor)
+            }
+            if not competitor_source_ids:
+                feedback.append(
+                    ReviewFeedback(
+                        issue="missing_source",
+                        target_agent="collector",
+                        target_artifact_id=f"collector_coverage:{competitor}",
+                        message=f"No active source covers competitor: {competitor}.",
+                        required_action=(
+                            f"Collect at least one source specifically about {competitor}."
+                        ),
+                    )
+                )
+                continue
+
+            competitor_claims = [
+                claim
+                for claim in claims.values()
+                if competitor_source_ids.intersection(claim.source_ids)
+            ]
+            report_mentions_competitor_claim = any(
+                claim.id in report.claim_ids for claim in competitor_claims
+            )
+            if not report_mentions_competitor_claim:
+                feedback.append(
+                    ReviewFeedback(
+                        issue="unsupported_claim",
+                        target_agent="analyst",
+                        target_artifact_id=report.id,
+                        message=(
+                            f"Competitor source coverage exists for {competitor}, "
+                            "but the report has no active claim using it."
+                        ),
+                        required_action=(
+                            f"Create sourced claims about {competitor} and include "
+                            "them in the report before approval."
+                        ),
+                    )
+                )
+
+        return feedback
+
+
+def _source_mentions_entity(source: SourceArtifact, entity: str) -> bool:
+    if source.url.startswith("https://rework.local/"):
+        return False
+    metadata_entity = source.metadata.get("entity")
+    if isinstance(metadata_entity, str) and metadata_entity == entity:
+        return True
+    haystack = " ".join([source.title, source.snippet, source.url]).lower()
+    return entity.lower() in haystack
 
 
 def _unique_feedback(feedback: list[ReviewFeedback]) -> list[ReviewFeedback]:

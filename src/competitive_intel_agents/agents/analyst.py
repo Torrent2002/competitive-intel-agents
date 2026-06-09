@@ -40,7 +40,11 @@ class AnalystAgent(BaseAgent):
             )
 
         existing_claims = self._artifacts.list_claims(context.run_id)
-        if len(existing_claims) >= self._target_claims:
+        target_claims = self._effective_target_claims(context, sources)
+        if (
+            len(existing_claims) >= target_claims
+            and not self._unclaimed_required_source_ids(context, sources, existing_claims)
+        ):
             return AgentRoundResult(
                 completed=True,
                 output_artifact_ids=[],
@@ -54,7 +58,14 @@ class AnalystAgent(BaseAgent):
             saved_ids = self._template_claims(context, sources, existing_claims)
 
         claims_after_save = self._artifacts.list_claims(context.run_id)
-        completed = len(claims_after_save) >= self._target_claims
+        completed = (
+            len(claims_after_save) >= target_claims
+            and not self._unclaimed_required_source_ids(
+                context,
+                sources,
+                claims_after_save,
+            )
+        )
         if saved_ids:
             signals = ["claims_created"]
         elif completed:
@@ -166,8 +177,17 @@ class AnalystAgent(BaseAgent):
             for source_id in claim.source_ids
         }
         saved_ids: list[str] = []
-        for source in sources:
-            if len(existing_claims) + len(saved_ids) >= self._target_claims:
+        ordered_sources = self._prioritized_sources(context, sources, existing_claims)
+        for source in ordered_sources:
+            target_claims = self._effective_target_claims(context, sources)
+            if (
+                len(existing_claims) + len(saved_ids) >= target_claims
+                and source.id not in self._unclaimed_required_source_ids(
+                    context,
+                    sources,
+                    [*existing_claims, *self._claims_by_id(context.run_id, saved_ids)],
+                )
+            ):
                 break
             if source.id in claimed_source_ids:
                 continue
@@ -176,6 +196,56 @@ class AnalystAgent(BaseAgent):
             saved_ids.append(claim.id)
             claimed_source_ids.add(source.id)
         return saved_ids
+
+    def _prioritized_sources(
+        self,
+        context: RunContext,
+        sources: list[SourceArtifact],
+        existing_claims: list[AnalysisClaim],
+    ) -> list[SourceArtifact]:
+        unclaimed_required = self._unclaimed_required_source_ids(
+            context,
+            sources,
+            existing_claims,
+        )
+        return sorted(
+            sources,
+            key=lambda source: 0 if source.id in unclaimed_required else 1,
+        )
+
+    def _effective_target_claims(
+        self,
+        context: RunContext,
+        sources: list[SourceArtifact],
+    ) -> int:
+        required_entities = 1 + len(context.request.competitors)
+        return max(self._target_claims, required_entities)
+
+    def _unclaimed_required_source_ids(
+        self,
+        context: RunContext,
+        sources: list[SourceArtifact],
+        claims: list[AnalysisClaim],
+    ) -> set[str]:
+        claimed_source_ids = {
+            source_id
+            for claim in claims
+            for source_id in claim.source_ids
+        }
+        required_entities = {context.request.company, *context.request.competitors}
+        return {
+            source.id
+            for source in sources
+            if source.id not in claimed_source_ids
+            and source.metadata.get("entity") in required_entities
+        }
+
+    def _claims_by_id(self, run_id: str, claim_ids: list[str]) -> list[AnalysisClaim]:
+        claims = {
+            claim.id: claim
+            for claim in self._artifacts.list_claims(run_id)
+        }
+        return [claims[claim_id] for claim_id in claim_ids if claim_id in claims]
 
     def _claim_from_source(
         self,

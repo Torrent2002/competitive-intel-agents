@@ -1,7 +1,9 @@
 from pathlib import Path
 
 from competitive_intel_agents.runtime import (
+    BingSearch,
     CachedWebFetch,
+    FallbackSearch,
     DuckDuckGoSearch,
     HttpClient,
     WebFetchTool,
@@ -53,6 +55,71 @@ def test_duckduckgo_search_parses_html_results_without_network() -> None:
     assert results[0]["url"] == "https://example.com/a"
     assert results[0]["snippet"] == "Snippet A"
     assert results[1]["url"] == "https://example.com/b"
+
+
+def test_bing_search_parses_redirect_results_without_network() -> None:
+    html = """
+    <ol id="b_results">
+      <li class="b_algo">
+        <h2><a href="https://www.bing.com/ck/a?!&amp;u=a1aHR0cHM6Ly9leGFtcGxlLmNvbS9h&amp;ntb=1">Result A</a></h2>
+        <div class="b_caption"><p>Snippet A</p></div>
+      </li>
+    </ol>
+    """
+    client = StubHttpClient(
+        {"https://www.bing.com/search?q=Notion+pricing&mkt=en-US&setlang=en&cc=US": html}
+    )
+    search = BingSearch(http_client=client)
+
+    results = search.search("Notion pricing", limit=1)
+
+    assert results == [
+        {"title": "Result A", "url": "https://example.com/a", "snippet": "Snippet A"}
+    ]
+
+
+def test_fallback_search_uses_next_adapter_when_first_returns_no_results() -> None:
+    class EmptyAdapter:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def search(self, query: str, limit: int = 5) -> list[dict]:
+            self.calls.append(query)
+            return []
+
+    class WorkingAdapter:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int]] = []
+
+        def search(self, query: str, limit: int = 5) -> list[dict]:
+            self.calls.append((query, limit))
+            return [{"title": "Result", "url": "https://example.com/result"}]
+
+    empty = EmptyAdapter()
+    working = WorkingAdapter()
+    search = FallbackSearch([empty, working])
+
+    results = search.search("Notion pricing", limit=3)
+
+    assert results == [{"title": "Result", "url": "https://example.com/result"}]
+    assert empty.calls == ["Notion pricing"]
+    assert working.calls == [("Notion pricing", 3)]
+
+
+def test_fallback_search_uses_next_adapter_when_first_raises() -> None:
+    class BrokenAdapter:
+        def search(self, query: str, limit: int = 5) -> list[dict]:
+            raise RuntimeError("network down")
+
+    class WorkingAdapter:
+        def search(self, query: str, limit: int = 5) -> list[dict]:
+            return [{"title": query, "url": "https://example.com"}]
+
+    search = FallbackSearch([BrokenAdapter(), WorkingAdapter()])
+
+    assert search.search("ByteDance", limit=1) == [
+        {"title": "ByteDance", "url": "https://example.com"}
+    ]
 
 
 def test_web_fetch_tool_extracts_title_and_text_preview() -> None:

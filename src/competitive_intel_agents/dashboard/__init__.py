@@ -72,6 +72,10 @@ def render_dashboard(snapshot: DashboardSnapshot) -> str:
 
 
 def _run_status(events: list[RoundEvent]) -> str:
+    if events[-1].agent == "reviewer" and events[-1].decision == "stop":
+        return "completed"
+    if events[-1].decision == "rework":
+        return "needs_rework"
     if any(event.decision == "abort" for event in events):
         return "aborted"
     if any(event.decision == "rework" for event in events):

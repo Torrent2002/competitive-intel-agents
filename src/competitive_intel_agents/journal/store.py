@@ -55,7 +55,7 @@ class SQLiteJournalStore:
     """SQLite-backed append-only journal store."""
 
     def __init__(self, path: str | Path = ":memory:") -> None:
-        self._connection = sqlite3.connect(path)
+        self._connection = sqlite3.connect(path, check_same_thread=False)
         self._connection.execute(
             """
             CREATE TABLE IF NOT EXISTS journal_events (

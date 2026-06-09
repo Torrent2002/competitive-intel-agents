@@ -2,8 +2,10 @@ from competitive_intel_agents.agents import BaseAgent
 from competitive_intel_agents.models import (
     AgentResult,
     CompetitiveIntelRequest,
+    RoundEvent,
     ReviewFeedback,
 )
+from competitive_intel_agents.journal import InMemoryJournalStore
 from competitive_intel_agents.orchestrator import Orchestrator
 
 
@@ -16,10 +18,18 @@ def make_request() -> CompetitiveIntelRequest:
     )
 
 
+def make_single_company_request() -> CompetitiveIntelRequest:
+    return CompetitiveIntelRequest(
+        company="ACME",
+        market="collaboration software",
+        questions=["pricing"],
+    )
+
+
 def test_orchestrator_runs_default_dag_end_to_end_with_fake_tools() -> None:
     orchestrator = Orchestrator(run_id_factory=lambda: "run_001")
 
-    result = orchestrator.run(make_request())
+    result = orchestrator.run(make_single_company_request())
 
     assert result.status == "approved"
     assert result.run_id == "run_001"
@@ -159,6 +169,68 @@ def test_orchestrator_can_apply_rework_until_reviewer_approves() -> None:
     assert result.status == "approved"
     assert result.review_feedback == []
     assert harness.reviewer_calls == 2
+
+
+class CoveragePartialHarness:
+    def __init__(self, journal: InMemoryJournalStore) -> None:
+        self.journal = journal
+        self.agents: list[str] = []
+
+    def run_agent(self, context, agent: BaseAgent) -> AgentResult:
+        self.agents.append(agent.name)
+        signals = ["coverage_partial"] if agent.name == "collector" else []
+        self.journal.append(
+            RoundEvent(
+                id=f"{context.run_id}:{agent.name}:{len(self.agents)}",
+                run_id=context.run_id,
+                agent=agent.name,
+                round=1,
+                decision="stop",
+                signals=signals,
+            )
+        )
+        return AgentResult(agent=agent.name, decision="stop", rounds=1)
+
+
+def test_orchestrator_skips_writer_when_analyst_sees_partial_coverage() -> None:
+    journal = InMemoryJournalStore()
+    harness = CoveragePartialHarness(journal)
+    orchestrator = Orchestrator(
+        journal=journal,
+        harness=harness,
+        run_id_factory=lambda: "run_coverage_rework",
+    )
+
+    result = orchestrator.run(make_request())
+
+    assert result.status == "needs_rework"
+    assert result.report_id is None
+    assert result.review_feedback[0].target_agent == "collector"
+    assert result.review_feedback[0].issue == "missing_source"
+    assert harness.agents == ["collector", "analyst"]
+
+
+def test_orchestrator_recollects_before_writer_when_integrated_rework_enabled() -> None:
+    journal = InMemoryJournalStore()
+    harness = CoveragePartialHarness(journal)
+    orchestrator = Orchestrator(
+        journal=journal,
+        harness=harness,
+        enable_rework=True,
+        run_id_factory=lambda: "run_coverage_rework",
+    )
+
+    result = orchestrator.run(make_request())
+
+    assert result.status == "approved"
+    assert harness.agents == [
+        "collector",
+        "analyst",
+        "collector",
+        "analyst",
+        "writer",
+        "reviewer",
+    ]
 
 
 def test_orchestrator_returns_rework_failed_after_max_attempts() -> None:

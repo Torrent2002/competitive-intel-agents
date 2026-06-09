@@ -1,6 +1,7 @@
 """Model and tool runtime adapters."""
 
 from competitive_intel_agents.runtime.model_runtime import (
+    AnthropicMessagesProvider,
     ConfiguredProviderFactory,
     FakeModelProvider,
     HttpModelProvider,
@@ -16,7 +17,9 @@ from competitive_intel_agents.runtime.tool_runtime import (
 )
 from competitive_intel_agents.runtime.web_tools import (
     CachedWebFetch,
+    BingSearch,
     DuckDuckGoSearch,
+    FallbackSearch,
     HttpClient,
     WebFetchTool,
     WebSearchTool,
@@ -24,8 +27,11 @@ from competitive_intel_agents.runtime.web_tools import (
 
 __all__ = [
     "CachedWebFetch",
+    "AnthropicMessagesProvider",
+    "BingSearch",
     "ConfiguredProviderFactory",
     "DuckDuckGoSearch",
+    "FallbackSearch",
     "FakeModelProvider",
     "FakeWebFetch",
     "FakeWebSearch",

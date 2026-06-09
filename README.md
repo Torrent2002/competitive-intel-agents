@@ -363,6 +363,26 @@ If editable install fails because of a system Python or certificate issue, the
 Provider-backed model runtime is available behind environment configuration.
 By default the project uses deterministic fake model output.
 
+Option A: local JSON config (recommended for repeated local runs):
+
+```bash
+cp config/model.example.json config/model.json
+# Edit config/model.json and fill provider, endpoint, api_key, and model.
+
+PYTHONPATH=src python -m competitive_intel_agents.cli chat \
+  --workspace .competitive-intel \
+  --real-web \
+  --real-model
+```
+
+`config/model.json` is ignored by git so your API key stays local.
+Supported provider values:
+
+- `openai-compatible`: endpoint should be a chat completions URL such as `/v1/chat/completions`.
+- `anthropic-compatible`: endpoint should be the API host root; the code appends `/v1/messages`.
+
+Option B: environment variables:
+
 ```bash
 export CIA_MODEL_PROVIDER=openai-compatible
 export CIA_MODEL_ENDPOINT=https://api.example.com/v1/chat/completions

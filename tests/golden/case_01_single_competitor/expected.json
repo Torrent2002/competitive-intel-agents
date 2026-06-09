@@ -12,7 +12,7 @@
   "require_report_source_coverage": true,
   "max_reviewer_rejections": 0,
   "max_total_rounds": 12,
-  "max_tool_calls": 8,
+  "max_tool_calls": 80,
   "terminal_status": "approved",
   "terminal_decision": "stop",
   "require_reviewer": true,

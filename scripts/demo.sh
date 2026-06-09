@@ -16,6 +16,33 @@ cd "$PROJECT_DIR"
 
 export PYTHONPATH="$PROJECT_DIR/src"
 
+PYTHON_BIN="${PYTHON:-}"
+if [ -z "$PYTHON_BIN" ]; then
+    if command -v python3.12 >/dev/null 2>&1; then
+        PYTHON_BIN="$(command -v python3.12)"
+    elif [ -x /opt/homebrew/bin/python3.12 ]; then
+        PYTHON_BIN="/opt/homebrew/bin/python3.12"
+    else
+        PYTHON_BIN="$(command -v python3 || true)"
+    fi
+fi
+
+if [ -z "$PYTHON_BIN" ]; then
+    echo "Error: Python 3.12+ is required, but no Python interpreter was found."
+    exit 1
+fi
+
+"$PYTHON_BIN" - <<'PY'
+import sys
+if sys.version_info < (3, 12):
+    raise SystemExit(
+        f"Error: Python 3.12+ is required, got {sys.version.split()[0]}. "
+        "Set PYTHON=/path/to/python3.12 or install python3.12."
+    )
+PY
+
+echo "Python: $($PYTHON_BIN --version)"
+
 # Ensure test fixtures exist
 FIXTURE="$PROJECT_DIR/tests/fixtures/request.json"
 if [ ! -f "$FIXTURE" ]; then
@@ -31,7 +58,7 @@ echo ""
 
 # 1. Run the fake pipeline
 echo "--- Step 1: Run pipeline ---"
-python3 -m competitive_intel_agents.cli run \
+"$PYTHON_BIN" -m competitive_intel_agents.cli run \
     --input "$FIXTURE" \
     --config config/agent_profiles.yaml \
     --fake-model \
@@ -42,12 +69,12 @@ echo ""
 
 # 2. List runs
 echo "--- Step 2: List runs ---"
-python3 -m competitive_intel_agents.cli runs \
+"$PYTHON_BIN" -m competitive_intel_agents.cli runs \
     --workspace "$WORKSPACE"
 echo ""
 
 # 3. Get the run ID from the workspace
-RUN_ID=$(python3 -c "
+RUN_ID=$("$PYTHON_BIN" -c "
 import json
 from pathlib import Path
 runs = json.loads(Path('$WORKSPACE/runs.json').read_text())
@@ -62,14 +89,14 @@ echo ""
 
 # 4. Show dashboard
 echo "--- Step 3: Dashboard ---"
-python3 -m competitive_intel_agents.cli dashboard \
+"$PYTHON_BIN" -m competitive_intel_agents.cli dashboard \
     --run-id "$RUN_ID" \
     --workspace "$WORKSPACE"
 echo ""
 
 # 5. Export report as JSON
 echo "--- Step 4: Export JSON ---"
-python3 -m competitive_intel_agents.cli export \
+"$PYTHON_BIN" -m competitive_intel_agents.cli export \
     --run-id "$RUN_ID" \
     --format json \
     --workspace "$WORKSPACE" \
@@ -79,7 +106,7 @@ echo ""
 
 # 6. Export report as HTML
 echo "--- Step 5: Export HTML ---"
-python3 -m competitive_intel_agents.cli export \
+"$PYTHON_BIN" -m competitive_intel_agents.cli export \
     --run-id "$RUN_ID" \
     --format html \
     --workspace "$WORKSPACE" \
@@ -89,7 +116,7 @@ echo ""
 
 # 7. Run golden suite
 echo "--- Step 6: Golden Suite ---"
-python3 -m competitive_intel_agents.cli golden \
+"$PYTHON_BIN" -m competitive_intel_agents.cli golden \
     --root tests/golden
 GOLDEN_EXIT=$?
 echo ""

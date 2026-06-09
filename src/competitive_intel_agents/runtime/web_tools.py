@@ -7,6 +7,7 @@ import html
 import json
 import os
 import re
+import base64
 from pathlib import Path
 from typing import Callable, Protocol
 from urllib import parse, request as urllib_request
@@ -104,6 +105,70 @@ class DuckDuckGoSearch:
             except Exception:
                 pass
         return results
+
+
+class BingSearch:
+    """Bing HTML-search adapter used when DuckDuckGo is unavailable."""
+
+    def __init__(
+        self,
+        http_client: HttpClient | None = None,
+        timeout: float = 10.0,
+    ) -> None:
+        self._http_client = http_client or HttpClient()
+        self._timeout = timeout
+
+    def search(self, query: str, limit: int = 5) -> list[dict]:
+        encoded = parse.quote_plus(query)
+        market = "zh-CN" if _contains_cjk(query) else "en-US"
+        language = "zh-Hans" if market == "zh-CN" else "en"
+        try:
+            html_text = self._http_client.get_text(
+                f"https://www.bing.com/search?q={encoded}&mkt={market}"
+                f"&setlang={language}&cc={'CN' if market == 'zh-CN' else 'US'}",
+                timeout=self._timeout,
+            )
+        except Exception as exc:
+            import sys
+
+            print(
+                f"[bing] query={query[:50]!r} results=0 error={exc}",
+                file=sys.stderr,
+            )
+            return []
+        results = _parse_bing_html(html_text, limit)
+        if not results:
+            import sys
+
+            print(
+                f"[bing] query={query[:50]!r} results=0 parsed_empty(len={len(html_text)})",
+                file=sys.stderr,
+            )
+        return results
+
+
+class FallbackSearch:
+    """Try search adapters in order until one returns results."""
+
+    def __init__(self, adapters: list[SearchAdapter]) -> None:
+        self._adapters = adapters
+
+    def search(self, query: str, limit: int = 5) -> list[dict]:
+        for adapter in self._adapters:
+            try:
+                results = adapter.search(query, limit=limit)
+            except Exception as exc:
+                import sys
+
+                print(
+                    f"[search] adapter={adapter.__class__.__name__} "
+                    f"query={query[:50]!r} error={exc}",
+                    file=sys.stderr,
+                )
+                continue
+            if results:
+                return results[:limit]
+        return []
 
 
 class WebSearchTool:
@@ -245,6 +310,74 @@ def _parse_duckduckgo_html(html_text: str, limit: int) -> list[dict]:
     return _parse_duckduckgo_lite(html_text, limit)
 
 
+def _parse_bing_html(html_text: str, limit: int) -> list[dict]:
+    results: list[dict] = []
+    seen_urls: set[str] = set()
+    blocks = re.findall(
+        r'<li\b[^>]*class="[^"]*\bb_algo\b[^"]*"[^>]*>(.*?)</li>',
+        html_text,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if not blocks:
+        blocks = [html_text]
+
+    for block in blocks:
+        match = re.search(
+            r'<h2[^>]*>\s*<a\b[^>]*href="(?P<href>[^"]+)"[^>]*>(?P<title>.*?)</a>',
+            block,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if not match:
+            match = re.search(
+                r'<a\b[^>]*href="(?P<href>https?://[^"]+)"[^>]*>(?P<title>.*?)</a>',
+                block,
+                re.DOTALL | re.IGNORECASE,
+            )
+        if not match:
+            continue
+        url = _normalize_bing_url(html.unescape(match.group("href")))
+        title = _strip_tags(match.group("title"))
+        if not title or not url.startswith(("http://", "https://")):
+            continue
+        if "bing.com" in parse.urlparse(url).netloc:
+            continue
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+
+        snippet = ""
+        snippet_match = re.search(
+            r'<p\b[^>]*>(?P<snippet>.*?)</p>',
+            block,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if snippet_match:
+            snippet = _strip_tags(snippet_match.group("snippet"))
+
+        results.append({"title": title, "url": url, "snippet": snippet})
+        if len(results) >= limit:
+            break
+    return results
+
+
+def _normalize_bing_url(href: str) -> str:
+    parsed = parse.urlparse(href)
+    if "bing.com" not in parsed.netloc:
+        return href
+    query = parse.parse_qs(parsed.query)
+    encoded = query.get("u", [""])[0]
+    if encoded.startswith("a1"):
+        encoded = encoded[2:]
+    if not encoded:
+        return href
+    padding = "=" * (-len(encoded) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode((encoded + padding).encode()).decode()
+    except Exception:
+        return href
+    return decoded if decoded.startswith(("http://", "https://")) else href
+
+
 def _normalize_duckduckgo_url(href: str) -> str:
     if href.startswith("//"):
         href = "https:" + href
@@ -269,3 +402,7 @@ def _clean_html_text(html_text: str) -> str:
 
 def _strip_tags(value: str) -> str:
     return html.unescape(re.sub(r"<[^>]+>", " ", value)).strip()
+
+
+def _contains_cjk(text: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in text)

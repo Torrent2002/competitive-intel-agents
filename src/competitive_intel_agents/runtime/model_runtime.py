@@ -100,7 +100,15 @@ class AnthropicMessagesProvider:
         self._timeout = timeout
 
     def complete(self, request: ModelRequest) -> dict[str, Any]:
-        messages = list(request.messages)
+        system_parts: list[str] = []
+        messages: list[dict[str, str]] = []
+        for message in request.messages:
+            role = message.get("role", "")
+            content = message.get("content", "")
+            if role == "system":
+                system_parts.append(content)
+                continue
+            messages.append(message)
         if request.response_format:
             # Anthropic API doesn't support response_format — inject JSON instruction
             messages.append({
@@ -112,6 +120,8 @@ class AnthropicMessagesProvider:
             "max_tokens": 2048,
             "messages": messages,
         }
+        if system_parts:
+            payload["system"] = "\n\n".join(system_parts)
         raw = self._transport.post_json(
             f"{self.endpoint}/v1/messages",
             headers={
@@ -175,7 +185,18 @@ class HttpModelProvider:
 
 
 class ConfiguredProviderFactory:
-    """Create providers from env vars, falling back to config/model.json."""
+    """Create model providers from env vars or a local JSON config.
+
+    Loading order:
+    1. Environment variables, for example `CIA_MODEL_PROVIDER` and
+       `CIA_MODEL_API_KEY`.
+    2. `config/model.json`, which is intentionally git-ignored because it may
+       contain a real API key.
+
+    To configure a local model without exporting env vars, copy
+    `config/model.example.json` to `config/model.json` and fill:
+    `provider`, `endpoint`, `api_key`, and `model`.
+    """
 
     _DEFAULT_PATHS = (Path(__file__).resolve().parents[3] / "config" / "model.json",)
 
@@ -227,7 +248,8 @@ class ConfiguredProviderFactory:
             model = self._get("CIA_MODEL_NAME") or self._get("model")
             if not endpoint or not api_key or not model:
                 raise ValueError(
-                    "Set CIA_MODEL_ENDPOINT/api_key/name env vars or configure config/model.json"
+                    "Set CIA_MODEL_ENDPOINT/CIA_MODEL_API_KEY/CIA_MODEL_NAME "
+                    "or copy config/model.example.json to config/model.json"
                 )
             return HttpModelProvider(endpoint=endpoint, api_key=api_key, model=model)
         if provider == "anthropic-compatible":
@@ -236,7 +258,8 @@ class ConfiguredProviderFactory:
             model = self._get("CIA_MODEL_NAME") or self._get("model")
             if not endpoint or not api_key or not model:
                 raise ValueError(
-                    "Set CIA_MODEL_ENDPOINT/api_key/name env vars or configure config/model.json"
+                    "Set CIA_MODEL_ENDPOINT/CIA_MODEL_API_KEY/CIA_MODEL_NAME "
+                    "or copy config/model.example.json to config/model.json"
                 )
             return AnthropicMessagesProvider(
                 endpoint=endpoint, api_key=api_key, model=model

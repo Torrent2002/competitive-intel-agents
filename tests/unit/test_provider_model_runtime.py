@@ -1,5 +1,6 @@
 from competitive_intel_agents.models import ModelRequest
 from competitive_intel_agents.runtime import (
+    AnthropicMessagesProvider,
     ConfiguredProviderFactory,
     FakeModelProvider,
     HttpModelProvider,
@@ -57,6 +58,44 @@ def test_http_model_provider_normalizes_openai_compatible_response() -> None:
     assert raw["ok"] is True
     assert raw["content"] == "{\"ok\": true}"
     assert raw["usage"] == {"prompt_tokens": 3, "completion_tokens": 2}
+
+
+def test_anthropic_provider_moves_system_message_to_top_level_payload() -> None:
+    class Transport:
+        def __init__(self) -> None:
+            self.payload = None
+
+        def post_json(self, url, headers, payload, timeout):
+            self.payload = payload
+            return {
+                "content": [{"type": "text", "text": "{\"ok\": true}"}],
+                "usage": {"input_tokens": 3, "output_tokens": 2},
+            }
+
+    transport = Transport()
+    provider = AnthropicMessagesProvider(
+        endpoint="https://api.example.com",
+        api_key="secret",
+        model="test-model",
+        transport=transport,
+    )
+
+    provider.complete(
+        ModelRequest(
+            agent="analyst",
+            messages=[
+                {"role": "system", "content": "System instructions."},
+                {"role": "user", "content": "Analyze ACME."},
+            ],
+            response_format="json",
+        )
+    )
+
+    assert transport.payload["system"] == "System instructions."
+    assert [message["role"] for message in transport.payload["messages"]] == [
+        "user",
+        "user",
+    ]
 
 
 def test_configured_provider_factory_uses_env_without_leaking_into_agents() -> None:

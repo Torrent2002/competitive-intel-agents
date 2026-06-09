@@ -7,9 +7,38 @@ from competitive_intel_agents.models import (
     AgentState,
     CompetitiveIntelRequest,
     RunContext,
+    SourceArtifact,
     ToolResult,
 )
 from competitive_intel_agents.runtime import FakeWebFetch, FakeWebSearch, ToolRuntime
+
+
+class EmptySearch:
+    name = "web_search"
+
+    def run(self, args: dict) -> dict:
+        return {
+            "query": args["query"],
+            "results": [],
+            "total_results": 0,
+        }
+
+
+class SelectiveFetch:
+    name = "web_fetch"
+
+    def run(self, args: dict) -> dict:
+        url = args["url"]
+        if url in {
+            "https://www.matrixone.com",
+            "https://www.oceanbase.com",
+        }:
+            return {
+                "url": url,
+                "title": f"Official {url}",
+                "content": f"Official content from {url}",
+            }
+        raise RuntimeError(f"not reachable: {url}")
 
 
 def make_context(max_rounds: int = 4) -> RunContext:
@@ -74,6 +103,70 @@ def test_collector_first_round_builds_entity_dimension_coverage_queries() -> Non
     assert any("ACME official" in query for query in queries)
     assert any("Globex official" in query for query in queries)
     assert any("ACME vs Globex" in query for query in queries)
+
+
+def test_collector_marks_every_initial_coverage_slot_as_attempted() -> None:
+    store = InMemoryArtifactStore()
+    collector = CollectorAgent(store)
+
+    result = collector.run_round(make_context(), AgentState(agent="collector", round=1))
+
+    attempted = {
+        signal.removeprefix("attempted:")
+        for signal in result.signals
+        if signal.startswith("attempted:")
+    }
+
+    assert attempted >= {
+        "ACME:official",
+        "ACME:features",
+        "ACME:pricing",
+        "ACME:positioning",
+        "ACME:use cases",
+        "ACME:limitations",
+        "Globex:official",
+        "Globex:features",
+        "Globex:pricing",
+        "Globex:positioning",
+        "Globex:use cases",
+        "Globex:limitations",
+        "ACME:comparison:Globex",
+    }
+
+
+def test_collector_does_not_stop_on_source_count_before_competitor_attempts() -> None:
+    store = InMemoryArtifactStore()
+    store.save_source(
+        SourceArtifact(
+            id="source_run_001_001",
+            run_id="run_001",
+            url="https://acme.example/product",
+            title="ACME product",
+            snippet="ACME product evidence.",
+            metadata={"entity": "ACME", "dimension": "official"},
+        )
+    )
+    store.save_source(
+        SourceArtifact(
+            id="source_run_001_002",
+            run_id="run_001",
+            url="https://acme.example/pricing",
+            title="ACME pricing",
+            snippet="ACME pricing evidence.",
+            metadata={"entity": "ACME", "dimension": "pricing"},
+        )
+    )
+    collector = CollectorAgent(store, target_sources=2)
+
+    result = collector.run_round(make_context(), AgentState(agent="collector", round=1))
+
+    assert result.completed is False
+    assert result.tool_calls
+    assert any(
+        call.args["metadata"]["entity"] == "Globex"
+        for call in result.tool_calls
+    )
+    assert any(signal.startswith("attempted:Globex:") for signal in result.signals)
 
 
 def test_collector_uses_chinese_query_terms_for_chinese_requests() -> None:
@@ -149,6 +242,90 @@ def test_collector_turns_search_results_into_deduped_fetch_calls() -> None:
     ]
 
 
+def test_collector_falls_back_to_direct_official_urls_when_search_has_no_results() -> None:
+    store = InMemoryArtifactStore()
+    collector = CollectorAgent(store)
+    context = RunContext(
+        run_id="run_search_down",
+        request=CompetitiveIntelRequest(
+            company="MatrixOne",
+            competitors=["OceanBase"],
+            questions=["主要功能", "价格"],
+        ),
+        agent_profiles={
+            "collector": AgentProfile(
+                agent="collector",
+                max_rounds=10,
+                allowed_tools=["web_search", "web_fetch"],
+            )
+        },
+    )
+    first = collector.run_round(context, AgentState(agent="collector", round=1))
+
+    fallback = collector.run_round(
+        context,
+        AgentState(
+            agent="collector",
+            round=2,
+            memory={
+                "tool_results": [
+                    ToolResult(
+                        tool_call_id=call.id,
+                        ok=True,
+                        data={"query": call.args["query"], "results": []},
+                    ).to_dict()
+                    for call in first.tool_calls
+                ]
+            },
+        ),
+    )
+
+    urls = [call.args["url"] for call in fallback.tool_calls]
+
+    assert fallback.completed is False
+    assert "direct_url_fallback" in fallback.signals
+    assert "https://www.matrixone.com" in urls
+    assert "https://www.oceanbase.com" in urls
+
+
+def test_collector_harness_survives_search_down_with_direct_url_fallbacks() -> None:
+    store = InMemoryArtifactStore()
+    journal = InMemoryJournalStore()
+    tools = ToolRuntime()
+    tools.register(EmptySearch())
+    tools.register(SelectiveFetch())
+    harness = RuntimeHarness(journal, tools)
+    collector = CollectorAgent(store, target_sources=2)
+    context = RunContext(
+        run_id="run_search_down",
+        request=CompetitiveIntelRequest(
+            company="MatrixOne",
+            competitors=["OceanBase"],
+            questions=["主要功能", "价格"],
+        ),
+        agent_profiles={
+            "collector": AgentProfile(
+                agent="collector",
+                max_rounds=8,
+                allowed_tools=["web_search", "web_fetch"],
+            )
+        },
+    )
+
+    result = harness.run_agent(context, collector)
+    sources = store.list_sources("run_search_down")
+
+    assert result.decision == "stop"
+    assert {source.metadata.get("entity") for source in sources} >= {
+        "MatrixOne",
+        "OceanBase",
+    }
+    assert any(
+        "direct_url_fallback" in event.signals
+        for event in journal.list_run_events("run_search_down")
+    )
+
+
 def test_collector_saves_fetch_results_as_source_artifacts() -> None:
     store = InMemoryArtifactStore()
     collector = CollectorAgent(store, target_sources=2)
@@ -182,8 +359,9 @@ def test_collector_saves_fetch_results_as_source_artifacts() -> None:
     result = collector.run_round(make_context(), state)
     sources = store.list_sources("run_001")
 
-    assert result.completed is True
+    assert result.completed is False
     assert result.output_artifact_ids == ["source_run_001_001", "source_run_001_002"]
+    assert "coverage_incomplete" in result.signals
     assert [source.url for source in sources] == [
         "https://example.com/a",
         "https://example.com/b",
@@ -259,7 +437,7 @@ def test_collector_attaches_coverage_metadata_to_saved_sources() -> None:
     assert source.metadata["is_official"] is True
 
 
-def test_collector_requires_self_and_competitor_coverage_before_completion() -> None:
+def test_collector_marks_partial_coverage_when_competitor_is_missing() -> None:
     store = InMemoryArtifactStore()
     collector = CollectorAgent(store, target_sources=1)
     context = make_context(max_rounds=10)
@@ -268,12 +446,6 @@ def test_collector_requires_self_and_competitor_coverage_before_completion() -> 
         call.args["query"]
         for call in first.tool_calls
         if call.args["metadata"]["entity"] == "ACME"
-        and call.args["metadata"]["dimension"] == "official"
-    )
-    globex_query = next(
-        call.args["query"]
-        for call in first.tool_calls
-        if call.args["metadata"]["entity"] == "Globex"
         and call.args["metadata"]["dimension"] == "official"
     )
     acme_fetch = collector.run_round(
@@ -323,58 +495,51 @@ def test_collector_requires_self_and_competitor_coverage_before_completion() -> 
         ),
     )
 
-    assert first_save.completed is False
-    assert "coverage_incomplete" in first_save.signals
+    assert first_save.completed is True
+    assert "coverage_partial" in first_save.signals
 
     assert acme_fetch.tool_calls[0].args["url"] == "https://acme.com/product"
-    globex_fetch = collector.run_round(
+
+
+def test_collector_allows_partial_coverage_once_enough_sources_exist() -> None:
+    store = InMemoryArtifactStore()
+    collector = CollectorAgent(store, target_sources=2)
+    context = make_context(max_rounds=10)
+
+    collector.run_round(context, AgentState(agent="collector", round=1))
+    result = collector.run_round(
         context,
         AgentState(
             agent="collector",
-            round=4,
+            round=3,
             memory={
                 "tool_results": [
                     ToolResult(
-                        tool_call_id="search_globex",
+                        tool_call_id="fetch_1",
                         ok=True,
                         data={
-                            "query": globex_query,
-                            "results": [
-                                {
-                                    "url": "https://globex.com/product",
-                                    "title": "Globex",
-                                    "snippet": "Official Globex product details.",
-                                }
-                            ],
+                            "url": "https://example.com/a",
+                            "title": "Page A",
+                            "content": "Useful ACME evidence.",
                         },
-                    ).to_dict()
-                ]
-            },
-        ),
-    )
-    second_save = collector.run_round(
-        context,
-        AgentState(
-            agent="collector",
-            round=4,
-            memory={
-                "tool_results": [
+                    ).to_dict(),
                     ToolResult(
-                        tool_call_id="fetch_competitor",
+                        tool_call_id="fetch_2",
                         ok=True,
                         data={
-                            "url": "https://globex.com/product",
-                            "title": "Globex",
-                            "content": "Official Globex product details.",
+                            "url": "https://example.com/b",
+                            "title": "Page B",
+                            "content": "Useful market evidence.",
                         },
-                    ).to_dict()
+                    ).to_dict(),
                 ]
             },
         ),
     )
 
-    assert globex_fetch.tool_calls[0].args["url"] == "https://globex.com/product"
-    assert second_save.completed is True
+    assert result.completed is True
+    assert "coverage_partial" in result.signals
+    assert result.output_artifact_ids == ["source_run_001_001", "source_run_001_002"]
 
 
 def test_collector_continues_fetching_pending_urls_until_target_is_met() -> None:
@@ -491,7 +656,11 @@ def test_collector_skips_urls_already_saved() -> None:
 def test_collector_can_run_through_harness_with_fake_tools() -> None:
     store = InMemoryArtifactStore()
     collector = CollectorAgent(store, target_sources=2)
-    harness = make_harness()
+    journal = InMemoryJournalStore()
+    tools = ToolRuntime()
+    tools.register(FakeWebSearch())
+    tools.register(FakeWebFetch())
+    harness = RuntimeHarness(journal, tools)
 
     result = harness.run_agent(make_context(max_rounds=8), collector)
 
@@ -499,8 +668,7 @@ def test_collector_can_run_through_harness_with_fake_tools() -> None:
     assert len(result.output_artifact_ids) >= 2
     assert all(aid.startswith("source_run_001_") for aid in result.output_artifact_ids)
     assert len(store.list_sources("run_001")) >= 2
-    assert {
-        source.metadata.get("entity")
-        for source in store.list_sources("run_001")
-        if source.metadata.get("entity")
-    } >= {"ACME", "Globex"}
+    assert any(
+        "coverage_partial" in event.signals
+        for event in journal.list_run_events("run_001")
+    )

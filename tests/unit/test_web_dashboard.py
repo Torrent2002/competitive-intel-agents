@@ -154,7 +154,7 @@ def test_create_run_from_form_persists_request_and_result():
             },
         )
 
-        assert result.status == "approved"
+        assert result.status == "rework_failed"
         assert workspace.get_run_result(result.run_id) is not None
         assert workspace.artifacts.get_latest_report(result.run_id) is not None
 
