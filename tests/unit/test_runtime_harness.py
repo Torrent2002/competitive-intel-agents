@@ -114,6 +114,24 @@ class ToolResultAwareAgent(BaseAgent):
         )
 
 
+class ProgressWithFailingToolAgent(BaseAgent):
+    name = "collector"
+
+    def run_round(self, context: RunContext, state: AgentState) -> AgentRoundResult:
+        return AgentRoundResult(
+            output_artifact_ids=[f"source_{state.round}"],
+            tool_calls=[
+                ToolCall(
+                    id=f"tool_missing_{state.round}",
+                    name="missing_tool",
+                    args={},
+                    requested_by="collector",
+                )
+            ],
+            signals=["progress"],
+        )
+
+
 class ReworkAgent(BaseAgent):
     name = "reviewer"
 
@@ -213,6 +231,21 @@ def test_run_round_passes_context_to_tool_runtime_permissions() -> None:
 
     assert event.decision == "retry"
     assert "tool_error:tool_disallowed" in event.signals
+    assert journal.list_run_events("run_001") == [event]
+
+
+def test_run_round_continues_when_tool_errors_are_partial_and_progress_exists() -> None:
+    harness, journal, _ = make_harness()
+
+    event = harness.run_round(
+        make_context(allowed_tools=["web_search"]),
+        ProgressWithFailingToolAgent(),
+        round_index=1,
+    )
+
+    assert event.decision == "continue"
+    assert event.output_artifact_ids == ["source_1"]
+    assert "tool_error:tool_missing_1" in event.signals
     assert journal.list_run_events("run_001") == [event]
 
 

@@ -285,6 +285,7 @@ class SourceArtifact(VersionedArtifact):
     snippet: str = ""
     retrieved_at: str = field(default_factory=utc_now_iso)
     source_type: str = "web"
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         super().__post_init__()

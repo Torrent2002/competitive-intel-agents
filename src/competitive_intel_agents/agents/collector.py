@@ -34,6 +34,8 @@ class CollectorAgent(BaseAgent):
         self._model_runtime = model_runtime
         # Per-run state (reset each pipeline run since agent is reused)
         self._search_queries: list[str] = []
+        self._query_metadata: dict[str, dict] = {}
+        self._url_metadata: dict[str, dict] = {}
         self._queried_urls: set[str] = set()
         self._pending_urls: list[dict] = []  # {url, title, snippet}
         self._fetch_attempts: dict[str, int] = {}  # url -> attempt count
@@ -42,7 +44,7 @@ class CollectorAgent(BaseAgent):
         existing = self._artifacts.list_sources(context.run_id)
 
         # Done?
-        if len(existing) >= self._target_sources:
+        if self._collection_complete(context, existing):
             self._reset()
             return AgentRoundResult(
                 completed=True,
@@ -60,7 +62,7 @@ class CollectorAgent(BaseAgent):
                 ToolCall(
                     id=f"collector_search_{state.round}_{i+1}",
                     name="web_search",
-                    args={"query": q},
+                    args={"query": q, "metadata": self._metadata_for_query(q)},
                     requested_by=self.name,
                 )
                 for i, q in enumerate(queries)
@@ -77,6 +79,8 @@ class CollectorAgent(BaseAgent):
             new_urls = self._select_urls(search_results, count=8)
             self._pending_urls = new_urls
             if new_urls:
+                batch = new_urls[:5]
+                self._mark_fetch_scheduled(batch)
                 calls = [
                     ToolCall(
                         id=f"collector_fetch_{state.round}_{j+1}",
@@ -84,7 +88,7 @@ class CollectorAgent(BaseAgent):
                         args={"url": u["url"]},
                         requested_by=self.name,
                     )
-                    for j, u in enumerate(new_urls[:5])  # fetch up to 5 per round
+                    for j, u in enumerate(batch)  # fetch up to 5 per round
                 ]
                 return AgentRoundResult(
                     tool_calls=calls,
@@ -108,6 +112,7 @@ class CollectorAgent(BaseAgent):
             if pending and len(now) < self._target_sources:
                 batch = pending[:5]
                 self._pending_urls = pending[5:]
+                self._mark_fetch_scheduled(batch)
                 calls = [
                     ToolCall(
                         id=f"collector_fetch_{state.round}_{k+1}",
@@ -119,34 +124,46 @@ class CollectorAgent(BaseAgent):
                 ]
                 return AgentRoundResult(
                     tool_calls=calls,
+                    output_artifact_ids=saved,
                     signals=[f"fetch_x{len(calls)}"],
                 )
 
             # Not enough sources → generate refined queries
-            if len(now) < self._target_sources and self._search_queries:
+            if not self._collection_complete(context, now) and self._search_queries:
                 refined = self._refine_queries(context, now)
+                if not refined:
+                    gap_plan = self._coverage_gap_query_plan(context, now)
+                    self._query_metadata.update(
+                        {item["query"]: item["metadata"] for item in gap_plan}
+                    )
+                    refined = [item["query"] for item in gap_plan]
                 if refined:
                     self._search_queries = refined
                     calls = [
                         ToolCall(
                             id=f"collector_search_{state.round}_{m+1}",
                             name="web_search",
-                            args={"query": q},
+                            args={
+                                "query": q,
+                                "metadata": self._metadata_for_query(q),
+                            },
                             requested_by=self.name,
                         )
                         for m, q in enumerate(refined)
                     ]
                     return AgentRoundResult(
                         tool_calls=calls,
-                        signals=["search_refined"],
+                        output_artifact_ids=saved,
+                        signals=["search_refined", "coverage_incomplete"],
                     )
 
-            completed = len(now) >= self._target_sources or not pending
-            self._reset()
+            completed = self._collection_complete(context, now)
+            if completed:
+                self._reset()
             return AgentRoundResult(
                 completed=completed,
                 output_artifact_ids=saved,
-                signals=["sources_saved"] if saved else ["no_new_sources"],
+                signals=self._save_signals(saved, completed),
             )
 
         # No search results, no fetch results, no sources
@@ -162,6 +179,11 @@ class CollectorAgent(BaseAgent):
 
     def _generate_queries(self, context: RunContext) -> list[str]:
         """Generate 3-5 diverse search queries covering different angles."""
+        plan = self._coverage_query_plan(context)
+        if plan:
+            self._query_metadata = {item["query"]: item["metadata"] for item in plan}
+            return [item["query"] for item in plan]
+
         if self._model_runtime is not None:
             queries = self._model_queries(context)
             if queries and len(queries) >= 2:
@@ -169,6 +191,184 @@ class CollectorAgent(BaseAgent):
 
         # Fallback: simple template
         return self._template_queries(context)
+
+    def _coverage_query_plan(self, context: RunContext) -> list[dict]:
+        request = context.request
+        terms = self._query_terms(context)
+        entities = [(request.company, "self")]
+        entities.extend((competitor, "competitor") for competitor in request.competitors)
+        dimensions = self._coverage_dimensions(request.questions)
+        plan: list[dict] = []
+
+        for entity, role in entities:
+            plan.append(
+                self._query_item(
+                    f"{entity} {terms['official_product']}",
+                    entity,
+                    role,
+                    "official",
+                    "official",
+                    is_official=True,
+                )
+            )
+            plan.append(
+                self._query_item(
+                    f"{entity} {terms['docs_features']}",
+                    entity,
+                    role,
+                    "features",
+                    "docs",
+                    is_official=True,
+                )
+            )
+            for dimension in dimensions:
+                query = f"{entity} {self._dimension_query_term(dimension, terms)}"
+                source_type = "pricing" if dimension == "pricing" else "web"
+                plan.append(
+                    self._query_item(query, entity, role, dimension, source_type)
+                )
+
+        for competitor in request.competitors:
+            plan.append(
+                self._query_item(
+                    f"{request.company} {terms['comparison']} {competitor}",
+                    request.company,
+                    "self",
+                    "comparison",
+                    "comparison",
+                    competitor=competitor,
+                )
+            )
+
+        return self._dedupe_query_plan(plan)
+
+    def _coverage_gap_query_plan(
+        self,
+        context: RunContext,
+        sources: list[SourceArtifact],
+    ) -> list[dict]:
+        covered = self._covered_entities(sources)
+        terms = self._query_terms(context)
+        plan = []
+        for entity, role in self._required_entities(context):
+            if entity in covered:
+                continue
+            plan.append(
+                self._query_item(
+                    f"{entity} {terms['official_product']}",
+                    entity,
+                    role,
+                    "official",
+                    "official",
+                    is_official=True,
+                )
+            )
+            plan.append(
+                self._query_item(
+                    f"{entity} {terms['pricing_features']}",
+                    entity,
+                    role,
+                    "features",
+                    "web",
+                )
+            )
+        return self._dedupe_query_plan(plan)
+
+    @staticmethod
+    def _coverage_dimensions(questions: list[str]) -> list[str]:
+        dimensions = ["pricing", "positioning", "use cases", "limitations"]
+        for question in questions:
+            normalized = question.strip().lower()
+            if not normalized:
+                continue
+            if "price" in normalized or "pricing" in normalized or "价格" in normalized:
+                candidate = "pricing"
+            elif "功能" in normalized or "feature" in normalized:
+                candidate = "features"
+            elif "性能" in normalized or "benchmark" in normalized:
+                candidate = "performance"
+            else:
+                candidate = normalized
+            if candidate not in dimensions:
+                dimensions.append(candidate)
+        return dimensions[:5]
+
+    @staticmethod
+    def _query_terms(context: RunContext) -> dict[str, str]:
+        text = " ".join(
+            [
+                context.request.company,
+                *(context.request.competitors),
+                *(context.request.questions),
+            ]
+        )
+        if CollectorAgent._contains_cjk(text):
+            return {
+                "official_product": "官网 产品",
+                "docs_features": "文档 功能",
+                "comparison": "对比",
+                "pricing": "价格",
+                "positioning": "定位",
+                "use cases": "使用场景",
+                "limitations": "缺点 限制",
+                "features": "主要功能",
+                "performance": "性能 基准测试",
+                "pricing_features": "价格 功能",
+            }
+        return {
+            "official_product": "official product",
+            "docs_features": "docs features",
+            "comparison": "vs",
+            "pricing": "pricing",
+            "positioning": "positioning",
+            "use cases": "use cases",
+            "limitations": "limitations",
+            "features": "features",
+            "performance": "performance benchmark",
+            "pricing_features": "pricing features",
+        }
+
+    @staticmethod
+    def _dimension_query_term(dimension: str, terms: dict[str, str]) -> str:
+        return terms.get(dimension, dimension)
+
+    @staticmethod
+    def _contains_cjk(text: str) -> bool:
+        return any("\u4e00" <= char <= "\u9fff" for char in text)
+
+    @staticmethod
+    def _query_item(
+        query: str,
+        entity: str,
+        entity_role: str,
+        dimension: str,
+        source_type: str,
+        is_official: bool = False,
+        competitor: str | None = None,
+    ) -> dict:
+        metadata = {
+            "entity": entity,
+            "entity_role": entity_role,
+            "dimension": dimension,
+            "source_type": source_type,
+            "is_official": is_official,
+        }
+        if competitor:
+            metadata["competitor"] = competitor
+        return {"query": query, "metadata": metadata}
+
+    @staticmethod
+    def _dedupe_query_plan(plan: list[dict]) -> list[dict]:
+        deduped: list[dict] = []
+        seen: set[str] = set()
+        for item in plan:
+            query = item["query"]
+            key = query.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped
 
     def _model_queries(self, context: RunContext) -> list[str]:
         """Ask model for diverse search queries."""
@@ -251,9 +451,12 @@ class CollectorAgent(BaseAgent):
                 continue
             items = tr.data.get("results", [])
             if isinstance(items, list):
-                all_results.extend(
-                    item for item in items if isinstance(item, dict) and item.get("url")
-                )
+                metadata = self._metadata_for_query(str(tr.data.get("query", "")))
+                for item in items:
+                    if isinstance(item, dict) and item.get("url"):
+                        enriched = dict(item)
+                        enriched["metadata"] = metadata
+                        all_results.append(enriched)
         return all_results
 
     def _select_urls(self, results: list[dict], count: int) -> list[dict]:
@@ -266,12 +469,18 @@ class CollectorAgent(BaseAgent):
             url = r.get("url", "")
             if not url or url in self._queried_urls:
                 continue
+            if any(item["url"] == url for item in selected):
+                continue
             domain = self._domain(url)
             if domain in seen_domains:
                 continue
             seen_domains.add(domain)
-            selected.append({"url": url, "title": r.get("title", ""), "snippet": r.get("snippet", "")})
-            self._queried_urls.add(url)
+            selected.append({
+                "url": url,
+                "title": r.get("title", ""),
+                "snippet": r.get("snippet", ""),
+                "metadata": dict(r.get("metadata", {})),
+            })
             if len(selected) >= count:
                 return selected
 
@@ -280,8 +489,14 @@ class CollectorAgent(BaseAgent):
             url = r.get("url", "")
             if not url or url in self._queried_urls:
                 continue
-            selected.append({"url": url, "title": r.get("title", ""), "snippet": r.get("snippet", "")})
-            self._queried_urls.add(url)
+            if any(item["url"] == url for item in selected):
+                continue
+            selected.append({
+                "url": url,
+                "title": r.get("title", ""),
+                "snippet": r.get("snippet", ""),
+                "metadata": dict(r.get("metadata", {})),
+            })
             if len(selected) >= count:
                 return selected
 
@@ -299,13 +514,22 @@ class CollectorAgent(BaseAgent):
     def _filter_and_save(self, context: RunContext, tool_results: list[ToolResult]) -> list[str]:
         """Filter fetched results by relevance, then save the good ones."""
         saved: list[str] = []
-        existing_urls = {s.url for s in self._artifacts.list_sources(context.run_id)}
+        existing_sources = self._artifacts.list_sources(context.run_id)
+        existing_urls = {s.url for s in existing_sources}
+        remaining_slots = self._remaining_source_slots(context, existing_sources)
+        missing_entities = self._missing_entities(context, existing_sources)
 
         for tr in tool_results:
+            if len(saved) >= remaining_slots:
+                break
             if not tr.ok or "url" not in tr.data:
                 continue
             url = tr.data.get("url", "")
             if not url or url in existing_urls:
+                continue
+            metadata = self._metadata_for_url(url)
+            entity = metadata.get("entity")
+            if missing_entities and entity and entity not in missing_entities:
                 continue
 
             # Check relevance
@@ -330,10 +554,13 @@ class CollectorAgent(BaseAgent):
                 title=title or url,
                 snippet=snippet[:500],
                 source_type="web",
+                metadata=metadata,
             )
             self._artifacts.save_source(source)
             existing_urls.add(url)
             saved.append(aid)
+            if isinstance(entity, str):
+                missing_entities.discard(entity)
 
         return saved
 
@@ -434,6 +661,76 @@ class CollectorAgent(BaseAgent):
         n = len(self._artifacts.list_sources(run_id, status=None)) + 1
         return f"source_{run_id}_{n:03d}"
 
+    def _collection_complete(
+        self,
+        context: RunContext,
+        sources: list[SourceArtifact],
+    ) -> bool:
+        if len(sources) < self._effective_target_sources(context):
+            return False
+        covered = self._covered_entities(sources)
+        if not covered:
+            return len(sources) >= self._target_sources
+        return all(entity in covered for entity, _ in self._required_entities(context))
+
+    def _effective_target_sources(self, context: RunContext) -> int:
+        return max(self._target_sources, len(self._required_entities(context)))
+
+    def _remaining_source_slots(
+        self,
+        context: RunContext,
+        sources: list[SourceArtifact],
+    ) -> int:
+        count_gap = max(0, self._effective_target_sources(context) - len(sources))
+        covered = self._covered_entities(sources)
+        if not covered:
+            return count_gap
+        coverage_gap = sum(
+            1
+            for entity, _ in self._required_entities(context)
+            if entity not in covered
+        )
+        return max(count_gap, coverage_gap)
+
+    def _missing_entities(
+        self,
+        context: RunContext,
+        sources: list[SourceArtifact],
+    ) -> set[str]:
+        covered = self._covered_entities(sources)
+        if not covered:
+            return set()
+        return {
+            entity
+            for entity, _ in self._required_entities(context)
+            if entity not in covered
+        }
+
+    @staticmethod
+    def _required_entities(context: RunContext) -> list[tuple[str, str]]:
+        entities = [(context.request.company, "self")]
+        entities.extend(
+            (competitor, "competitor")
+            for competitor in context.request.competitors
+        )
+        return entities
+
+    @staticmethod
+    def _covered_entities(sources: list[SourceArtifact]) -> set[str]:
+        covered: set[str] = set()
+        for source in sources:
+            entity = source.metadata.get("entity")
+            if isinstance(entity, str) and entity:
+                covered.add(entity)
+        return covered
+
+    @staticmethod
+    def _save_signals(saved: list[str], completed: bool) -> list[str]:
+        signals = ["sources_saved"] if saved else ["no_new_sources"]
+        if not completed:
+            signals.append("coverage_incomplete")
+        return signals
+
     @staticmethod
     def _tool_results_from_memory(state: AgentState) -> list[ToolResult]:
         raw = state.memory.get("tool_results", [])
@@ -442,10 +739,26 @@ class CollectorAgent(BaseAgent):
         return [
             ToolResult.from_dict(item) if isinstance(item, dict) else item
             for item in raw
-            if isinstance(item, dict | ToolResult)
+            if isinstance(item, (dict, ToolResult))
         ]
 
     def _reset(self) -> None:
         self._search_queries = []
+        self._query_metadata = {}
+        self._url_metadata = {}
+        self._queried_urls = set()
         self._pending_urls = []
         self._fetch_attempts = {}
+
+    def _mark_fetch_scheduled(self, urls: list[dict]) -> None:
+        for item in urls:
+            url = item.get("url", "")
+            if url:
+                self._queried_urls.add(url)
+                self._url_metadata[url] = dict(item.get("metadata", {}))
+
+    def _metadata_for_query(self, query: str) -> dict:
+        return dict(self._query_metadata.get(query, {}))
+
+    def _metadata_for_url(self, url: str) -> dict:
+        return dict(self._url_metadata.get(url, {}))

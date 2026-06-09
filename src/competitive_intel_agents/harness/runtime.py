@@ -142,6 +142,7 @@ class RuntimeHarness:
         decision = self._decide(
             completed=result.completed,
             has_error=bool(result.error or tool_error_signals),
+            made_progress=bool(result.output_artifact_ids),
             run_id=context.run_id,
             agent=agent.name,
             signed_tool_calls=signed_tool_calls,
@@ -188,6 +189,7 @@ class RuntimeHarness:
         self,
         completed: bool,
         has_error: bool,
+        made_progress: bool,
         run_id: str,
         agent: AgentName,
         signed_tool_calls: list[ToolCall],
@@ -203,6 +205,9 @@ class RuntimeHarness:
         if self._has_repeated_tool_call(run_id, agent, signed_tool_calls):
             signals.append("repeated_tool_call")
             return "abort"
+        if has_error and made_progress and not is_budget_final_round:
+            signals.append("partial_tool_error_tolerated")
+            return "continue"
         if has_error or "stalled_round" in signals:
             reason = self._retry_reason(has_error, signals)
             if self._retry_exhausted(run_id, agent, reason):
