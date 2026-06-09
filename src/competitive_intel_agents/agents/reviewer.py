@@ -112,7 +112,8 @@ class ReviewerAgent(BaseAgent):
         task = (
             f"Review this competitive intelligence report about {context.request.company}. "
             f"Check for: unsupported claims (facts not backed by sources), "
-            f"weak inferences, unclear writing, missing depth. "
+            f"weak inferences, unclear writing, missing depth, and whether the report "
+            f"directly answers every user question. "
             f"Return a JSON object with a 'feedback' array. Each feedback item must have: "
             f"'issue' (one of: missing_source, unsupported_claim, weak_inference, unclear_writing, "
             f"format_violation, missing_section), "
@@ -127,6 +128,8 @@ class ReviewerAgent(BaseAgent):
                 "report": report_json,
                 "claims": claims_json,
                 "sources": sources_json,
+                "user_questions": context.request.questions,
+                "competitors": context.request.competitors,
             },
         )
         resp = self._model_runtime.complete(model_req)
@@ -186,6 +189,7 @@ class ReviewerAgent(BaseAgent):
         feedback.extend(self._missing_source_feedback(report, claims, sources))
         feedback.extend(self._uncovered_source_feedback(report, claims))
         feedback.extend(self._competitive_coverage_feedback(context, report, claims, sources))
+        feedback.extend(self._question_coverage_feedback(context, report, claims, sources))
         return feedback
 
     def _missing_section_feedback(
@@ -370,6 +374,80 @@ class ReviewerAgent(BaseAgent):
 
         return feedback
 
+    @staticmethod
+    def _question_coverage_feedback(
+        context: RunContext,
+        report: ReportDraft,
+        claims: dict[str, AnalysisClaim],
+        sources: dict[str, SourceArtifact],
+    ) -> list[ReviewFeedback]:
+        feedback: list[ReviewFeedback] = []
+        report_text = " ".join(report.sections.values())
+        claim_text = " ".join(
+            f"{claim.text} {claim.reasoning}" for claim in claims.values()
+        )
+        source_text = " ".join(
+            f"{source.title} {source.snippet} {source.url}" for source in sources.values()
+        )
+
+        for question in context.request.questions:
+            missing_parts = [
+                part
+                for part in _question_parts(question)
+                if not _text_covers_topic(report_text, part)
+            ]
+            if not missing_parts:
+                continue
+
+            missing = ", ".join(missing_parts)
+            if not all(
+                _text_covers_topic(source_text, part) for part in missing_parts
+            ):
+                feedback.append(
+                    ReviewFeedback(
+                        issue="missing_source",
+                        target_agent="collector",
+                        target_artifact_id=f"question_coverage:{question}",
+                        message=(
+                            f"Report does not answer user question dimensions: {missing}."
+                        ),
+                        required_action=(
+                            f"Collect sources that directly cover: {missing}."
+                        ),
+                    )
+                )
+            elif not all(
+                _text_covers_topic(claim_text, part) for part in missing_parts
+            ):
+                feedback.append(
+                    ReviewFeedback(
+                        issue="unsupported_claim",
+                        target_agent="analyst",
+                        target_artifact_id=report.id,
+                        message=(
+                            f"Sources exist, but claims do not address question dimensions: {missing}."
+                        ),
+                        required_action=(
+                            f"Create sourced claims that answer: {missing}."
+                        ),
+                    )
+                )
+            else:
+                feedback.append(
+                    ReviewFeedback(
+                        issue="missing_section",
+                        target_agent="writer",
+                        target_artifact_id=report.id,
+                        message=(
+                            f"Claims exist, but report text does not answer question dimensions: {missing}."
+                        ),
+                        required_action=(
+                            f"Revise the report to explicitly answer: {missing}."
+                        ),
+                    )
+                )
+        return feedback
+
 
 def _source_mentions_entity(source: SourceArtifact, entity: str) -> bool:
     if source.url.startswith("https://rework.local/"):
@@ -379,6 +457,52 @@ def _source_mentions_entity(source: SourceArtifact, entity: str) -> bool:
         return True
     haystack = " ".join([source.title, source.snippet, source.url]).lower()
     return entity.lower() in haystack
+
+
+def _question_parts(question: str) -> list[str]:
+    import re
+
+    parts = [
+        part.strip()
+        for part in re.split(r"[,，、;；/]+", question)
+        if part.strip()
+    ]
+    return parts or [question.strip()]
+
+
+def _text_covers_topic(text: str, topic: str) -> bool:
+    text_normalized = _normalize_text(text)
+    topic_normalized = _normalize_text(topic)
+    if not topic_normalized:
+        return True
+    if topic_normalized in text_normalized:
+        return True
+
+    tokens = _topic_tokens(topic)
+    if not tokens:
+        return False
+    return all(token in text_normalized for token in tokens)
+
+
+def _normalize_text(text: str) -> str:
+    return "".join(text.lower().split())
+
+
+def _topic_tokens(topic: str) -> list[str]:
+    import re
+
+    if any("\u4e00" <= char <= "\u9fff" for char in topic):
+        return [
+            part
+            for part in re.split(r"[\s,，、;；/]+", topic)
+            if len(part) >= 2
+        ]
+    stopwords = {"and", "or", "the", "a", "an", "of", "to", "in", "for"}
+    return [
+        token
+        for token in re.findall(r"[a-z0-9]+", topic.lower())
+        if len(token) > 2 and token not in stopwords
+    ]
 
 
 def _unique_feedback(feedback: list[ReviewFeedback]) -> list[ReviewFeedback]:

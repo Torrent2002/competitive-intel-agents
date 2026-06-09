@@ -28,6 +28,24 @@ def make_context(run_id: str = "run_001") -> RunContext:
     )
 
 
+def make_question_context(question: str, run_id: str = "run_001") -> RunContext:
+    return RunContext(
+        run_id=run_id,
+        request=CompetitiveIntelRequest(
+            company="Acme",
+            competitors=["Beta"],
+            questions=[question],
+        ),
+        agent_profiles={
+            "reviewer": AgentProfile(
+                agent="reviewer",
+                max_rounds=2,
+                allowed_tools=[],
+            )
+        },
+    )
+
+
 def save_source(
     store: InMemoryArtifactStore,
     source_id: str = "source_001",
@@ -184,6 +202,40 @@ def test_reviewer_rejects_competitor_source_without_competitor_claim() -> None:
         item.issue == "unsupported_claim"
         and item.target_agent == "analyst"
         and "Beta" in item.message
+        for item in result.review_feedback
+    )
+
+
+def test_reviewer_rejects_report_that_does_not_answer_user_question() -> None:
+    store = InMemoryArtifactStore()
+    save_source(store, "source_001", entity="Acme")
+    save_source(store, "source_002", entity="Beta")
+    save_source(store, "source_003", entity="Acme")
+    save_claim(store, "claim_001", source_ids=["source_001"])
+    save_claim(store, "claim_002", source_ids=["source_002"])
+    save_report(
+        store,
+        claim_ids=["claim_001", "claim_002"],
+        source_ids=["source_001", "source_002"],
+        sections={
+            "Overview": "Acme and Beta are compared at a high level.",
+            "Feature comparison": "The products differ in workflow.",
+            "Pricing": "Pricing is not available.",
+            "SWOT": "Strengths and weaknesses are listed.",
+            "Sources": "- source_001\n- source_002",
+        },
+    )
+
+    result = ReviewerAgent(store).run_round(
+        make_question_context("受众定位，市场份额，产品能力"),
+        AgentState(agent="reviewer"),
+    )
+
+    assert result.completed is False
+    assert any(
+        item.issue == "missing_source"
+        and item.target_agent == "collector"
+        and "受众定位" in item.message
         for item in result.review_feedback
     )
 

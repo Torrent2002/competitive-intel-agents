@@ -180,8 +180,8 @@ def test_cli_chat_runs_pipeline_and_accepts_inspection_commands(tmp_path: Path) 
 
     assert result.returncode == 0
     assert "Company: Notion" in result.stdout
-    assert "Run status: approved" in result.stdout
-    assert "Status: completed" in result.stdout
+    assert "Run status: rework_failed" in result.stdout
+    assert "Status: needs_rework" in result.stdout
     assert "source_" in result.stdout
     assert "claim_" in result.stdout
     assert "## Overview" in result.stdout
