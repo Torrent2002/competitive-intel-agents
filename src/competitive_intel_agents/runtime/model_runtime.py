@@ -6,7 +6,8 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Protocol
-from urllib import request as urllib_request
+
+import requests
 
 from competitive_intel_agents.models import ModelRequest, ModelResponse
 
@@ -42,22 +43,8 @@ class FakeModelProvider:
         }
 
 
-def _ensure_ssl_certs() -> None:
-    """Auto-detect SSL cert file for Homebrew Python on macOS."""
-    if os.environ.get("SSL_CERT_FILE"):
-        return  # already configured
-    for cert_path in (
-        "/etc/ssl/cert.pem",
-        "/opt/homebrew/etc/openssl@3/cert.pem",
-        "/usr/local/etc/openssl@3/cert.pem",
-    ):
-        if Path(cert_path).exists():
-            os.environ["SSL_CERT_FILE"] = cert_path
-            return
-
-
 class JsonPostTransport:
-    """Standard-library JSON POST transport for HTTP model providers."""
+    """JSON POST transport backed by requests (bundled certifi certs)."""
 
     def post_json(
         self,
@@ -66,19 +53,16 @@ class JsonPostTransport:
         payload: dict,
         timeout: float = 30.0,
     ) -> dict:
-        _ensure_ssl_certs()
-        data = json.dumps(payload).encode("utf-8")
-        request = urllib_request.Request(
-            url,
-            data=data,
-            headers={**headers, "Content-Type": "application/json"},
-            method="POST",
-        )
         try:
-            with urllib_request.urlopen(request, timeout=timeout) as response:
-                body = response.read().decode("utf-8", errors="replace")
-                return json.loads(body)
-        except Exception as exc:
+            response = requests.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as exc:
             raise RuntimeError(f"model provider request failed: {exc}") from exc
 
 
@@ -109,12 +93,9 @@ class AnthropicMessagesProvider:
                 system_parts.append(content)
                 continue
             messages.append(message)
-        if request.response_format:
-            # Anthropic API doesn't support response_format — inject JSON instruction
-            messages.append({
-                "role": "user",
-                "content": "IMPORTANT: You MUST respond with valid JSON only. No markdown, no explanation."
-            })
+        # JSON output instruction already lives in system prompts —
+        # injecting an extra user message here breaks the required
+        # user/assistant alternation in the Anthropic Messages API.
         payload: dict[str, Any] = {
             "model": self.model,
             "max_tokens": 2048,
