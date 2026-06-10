@@ -1,5 +1,5 @@
 collector:
-  max_rounds: 10
+  max_rounds: 20
   allowed_tools:
     - web_search
     - web_fetch

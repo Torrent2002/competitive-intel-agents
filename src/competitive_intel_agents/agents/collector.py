@@ -89,7 +89,10 @@ class CollectorAgent(BaseAgent):
         # --- Phase 2: Got search results → extract URLs to fetch ---
         search_results = self._extract_search_results(tool_results)
         if search_results:
-            new_urls = self._select_urls(search_results, count=8)
+            if self._model_runtime is not None:
+                new_urls = self._model_select_urls(context, search_results, count=8)
+            else:
+                new_urls = self._select_urls(search_results, count=8)
             self._pending_urls = new_urls
             if new_urls:
                 batch = new_urls[:5]
@@ -227,18 +230,140 @@ class CollectorAgent(BaseAgent):
             }
             return [item["query"] for item in rework_plan]
 
+        # When a real model is available, let it pick from the dimension menu
+        # instead of blindly firing all 15 template queries.
+        if self._model_runtime is not None:
+            queries = self._model_driven_query_selection(context)
+            if queries and len(queries) >= 3:
+                return queries
+
+        # Fallback: template coverage plan
         plan = self._coverage_query_plan(context)
         if plan:
             self._query_metadata = {item["query"]: item["metadata"] for item in plan}
             return [item["query"] for item in plan]
 
-        if self._model_runtime is not None:
-            queries = self._model_queries(context)
-            if queries and len(queries) >= 2:
-                return queries[:5]
-
-        # Fallback: simple template
+        # Last resort: simple template
         return self._template_queries(context)
+
+    def _model_driven_query_selection(self, context: RunContext) -> list[str]:
+        """Let the LLM pick queries from a dimension menu AND propose free queries.
+
+        The model receives a menu of template queries plus the freedom to invent
+        its own based on the full user request or reviewer feedback.
+        """
+        from competitive_intel_agents.prompts import AgentPromptLibrary
+
+        request = context.request
+        terms = self._query_terms(context)
+        entities = [(request.company, "self")]
+        entities.extend((c, "competitor") for c in request.competitors)
+        dimensions = self._coverage_dimensions(request.questions)
+
+        # Build a menu of available entity × dimension × source_type combos
+        menu_items: list[dict] = []
+        for entity, role in entities:
+            menu_items.append({
+                "label": f"{entity} 官网/产品页",
+                "query": f"{entity} {terms['official_product']}",
+                "entity": entity, "role": role,
+                "dimension": "official", "source_type": "official",
+            })
+            menu_items.append({
+                "label": f"{entity} 功能介绍/文档",
+                "query": f"{entity} {terms['docs_features']}",
+                "entity": entity, "role": role,
+                "dimension": "features", "source_type": "docs",
+            })
+            for dim in dimensions:
+                menu_items.append({
+                    "label": f"{entity} {dim}",
+                    "query": f"{entity} {self._dimension_query_term(dim, terms)}",
+                    "entity": entity, "role": role,
+                    "dimension": dim,
+                    "source_type": "pricing" if dim == "pricing" else "web",
+                })
+
+        for competitor in request.competitors:
+            menu_items.append({
+                "label": f"{request.company} vs {competitor} 对比",
+                "query": f"{request.company} {terms['comparison']} {competitor}",
+                "entity": request.company, "role": "self",
+                "dimension": "comparison", "source_type": "comparison",
+            })
+
+        # Include reviewer feedback if available for rework context
+        reviewer_hint = ""
+        rework_plan = context.metadata.get("collector_rework_plan")
+        if isinstance(rework_plan, dict):
+            reviewer_hint = (
+                f"\nReviewer feedback requires coverage of: "
+                f"{rework_plan.get('dimension','')} — "
+                f"{rework_plan.get('required_action','')}"
+            )
+
+        prompt_lib = AgentPromptLibrary()
+        menu_json = _json.dumps(menu_items, ensure_ascii=False)
+        task = (
+            f"You are selecting and creating search queries for competitive intelligence.\n"
+            f"Target: {request.company} in {request.market or 'its market'}.\n"
+            f"Competitors: {', '.join(request.competitors) if request.competitors else 'none'}.\n"
+            f"User questions: {', '.join(request.questions) if request.questions else 'none'}.\n"
+            f"{reviewer_hint}\n"
+            f"Below is a menu of template queries you can pick from. In ADDITION, you can "
+            f"invent your own free-form queries that are NOT in the menu — search terms that "
+            f"feel more natural, precise, or likely to surface high-quality evidence.\n\n"
+            f"Rules:\n"
+            f"1. Pick 3-5 items from the menu via their indices.\n"
+            f"2. Add 2-4 free-form queries that go beyond the menu. Good free queries are "
+            f"specific, search-engine-friendly, and target what you'd actually type into Google "
+            f"or Bing to find competitive intelligence. Examples: \"飞书 vs 钉钉 2025市场份额 对比 报告\", "
+            f"\"钉钉 企业用户数 2025 最新数据\", \"飞书 字节跳动 协同办公 核心竞争力\".\n"
+            f"3. Total (menu + free) should be 5-8 queries.\n\n"
+            f"Return ONLY valid JSON:\n"
+            f"{{\"selected_indices\": [0, 3, 7], \"free_queries\": [\"飞书 钉钉 2025 市场份额 对比 报告\", ...]}}\n\n"
+            f"Menu:\n{menu_json}"
+        )
+        model_req = prompt_lib.build(self.name, task, {
+            "request": request_payload(context),
+        })
+        resp = self._model_runtime.complete(model_req)
+        if not resp.ok or not resp.parsed:
+            return []
+
+        selected: list[str] = []
+        self._query_metadata = {}
+
+        # Menu selections
+        indices = resp.parsed.get("selected_indices", [])
+        if isinstance(indices, list):
+            for idx in indices:
+                if isinstance(idx, int) and 0 <= idx < len(menu_items):
+                    item = menu_items[idx]
+                    selected.append(item["query"])
+                    self._query_metadata[item["query"]] = {
+                        "entity": item["entity"],
+                        "entity_role": item["role"],
+                        "dimension": item["dimension"],
+                        "source_type": item["source_type"],
+                        "is_official": item["source_type"] in ("official", "docs"),
+                    }
+
+        # Free-form queries
+        free_queries = resp.parsed.get("free_queries", [])
+        if isinstance(free_queries, list):
+            for fq in free_queries:
+                if isinstance(fq, str) and fq.strip():
+                    q = fq.strip()
+                    selected.append(q)
+                    self._query_metadata[q] = {
+                        "entity": request.company,
+                        "entity_role": "self",
+                        "dimension": "free_search",
+                        "source_type": "web",
+                    }
+
+        return selected[:8]
 
     def _targeted_rework_plan(self, context: RunContext) -> list[dict]:
         raw = context.metadata.get("collector_rework_plan")
@@ -753,6 +878,74 @@ class CollectorAgent(BaseAgent):
             if len(selected) >= count:
                 return selected
 
+        return selected
+
+    def _model_select_urls(
+        self, context: RunContext, results: list[dict], count: int
+    ) -> list[dict]:
+        """Let the LLM evaluate search results and pick which URLs to fetch.
+
+        Unlike the hardcoded _url_quality_score, this lets the model apply its
+        own judgment about what constitutes a relevant source for THIS specific
+        product and market — no domain blocklists needed.
+        """
+        from competitive_intel_agents.prompts import AgentPromptLibrary
+
+        # Dedup and prepare candidates
+        seen_urls: set[str] = set()
+        candidates: list[dict] = []
+        for r in results:
+            url = str(r.get("url", ""))
+            if not url or url in self._queried_urls or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            candidates.append({
+                "url": url,
+                "title": str(r.get("title", "")),
+                "snippet": str(r.get("snippet", ""))[:300],
+            })
+
+        if len(candidates) <= count:
+            return candidates[:count]
+
+        # Ask the model to pick the best URLs
+        prompt_lib = AgentPromptLibrary()
+        candidates_json = _json.dumps(candidates, ensure_ascii=False)
+        task = (
+            f"You are evaluating search results for a competitive intelligence "
+            f"project about {context.request.company}"
+            f"{' vs ' + ', '.join(context.request.competitors) if context.request.competitors else ''}.\n\n"
+            f"For each search result below, decide if the URL is genuinely about "
+            f"{context.request.company} or its competitors/industry. REJECT results that are:\n"
+            f"- Dictionary/encyclopedia entries about individual Chinese characters (not the company)\n"
+            f"- Travel, hotel, or flight booking sites\n"
+            f"- Unrelated software forums (Adobe, Microsoft, Apple, etc.)\n"
+            f"- Government portals or generic news sites that don't discuss the target products\n"
+            f"- App store download pages with no substantive content\n\n"
+            f"Return the INDICES (0-based) of the {count} most relevant results, "
+            f"prioritizing official company sites, industry analysis, and pages that "
+            f"are clearly about the target product/market.\n\n"
+            f"Return ONLY valid JSON: {{\"selected_indices\": [0, 3, 7, ...]}}\n\n"
+            f"Search results:\n{candidates_json}"
+        )
+        model_req = prompt_lib.build(self.name, task, {
+            "request": request_payload(context),
+        })
+        resp = self._model_runtime.complete(model_req)
+        if not resp.ok or not resp.parsed:
+            # Model failed — fall back to algorithmic scoring
+            return self._select_urls(results, count)
+
+        indices = resp.parsed.get("selected_indices", [])
+        if not isinstance(indices, list) or len(indices) < 2:
+            return self._select_urls(results, count)
+
+        selected: list[dict] = []
+        for idx in indices:
+            if isinstance(idx, int) and 0 <= idx < len(candidates):
+                selected.append(candidates[idx])
+                if len(selected) >= count:
+                    break
         return selected
 
     @staticmethod

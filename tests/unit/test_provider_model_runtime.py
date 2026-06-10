@@ -92,8 +92,10 @@ def test_anthropic_provider_moves_system_message_to_top_level_payload() -> None:
     )
 
     assert transport.payload["system"] == "System instructions."
+    # response_format="json" no longer injects an extra user message —
+    # the JSON output instruction lives in the system prompt (set by
+    # AgentPromptLibrary) to keep user/assistant alternation valid.
     assert [message["role"] for message in transport.payload["messages"]] == [
-        "user",
         "user",
     ]
 
