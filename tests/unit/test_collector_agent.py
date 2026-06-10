@@ -105,6 +105,41 @@ def test_collector_first_round_builds_entity_dimension_coverage_queries() -> Non
     assert any("ACME vs Globex" in query for query in queries)
 
 
+def test_collector_preserves_content_reference_metadata_when_saving_source() -> None:
+    store = InMemoryArtifactStore()
+    collector = CollectorAgent(store, target_sources=1)
+    tool_result = ToolResult(
+        tool_call_id="fetch_001",
+        ok=True,
+        data={
+            "url": "https://example.com/acme",
+            "title": "ACME market page",
+            "content": "ACME pricing and audience evidence.",
+            "content_ref": "file:/tmp/acme.txt",
+            "content_hash": "abc123",
+            "char_count": 1234,
+            "summary": "ACME pricing and audience evidence.",
+            "preview": "ACME pricing",
+        },
+    )
+
+    result = collector.run_round(
+        make_context(),
+        AgentState(
+            agent="collector",
+            round=2,
+            memory={"tool_results": [tool_result.to_dict()]},
+        ),
+    )
+
+    assert result.output_artifact_ids
+    source = store.get_artifact(result.output_artifact_ids[0])
+    assert source.metadata["content_ref"] == "file:/tmp/acme.txt"
+    assert source.metadata["content_hash"] == "abc123"
+    assert source.metadata["char_count"] == 1234
+    assert source.metadata["summary"] == "ACME pricing and audience evidence."
+
+
 def test_collector_marks_every_initial_coverage_slot_as_attempted() -> None:
     store = InMemoryArtifactStore()
     collector = CollectorAgent(store)

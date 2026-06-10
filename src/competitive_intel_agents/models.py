@@ -320,6 +320,11 @@ class ReviewFeedback(SerializableModel):
     target_artifact_id: str
     message: str
     required_action: str
+    severity: str = "blocking"
+    blocking: bool = True
+    entity: str | None = None
+    dimension: str | None = None
+    question: str | None = None
 
     def __post_init__(self) -> None:
         require_choice(self.issue, VALID_REVIEW_ISSUES, "issue")
@@ -327,6 +332,7 @@ class ReviewFeedback(SerializableModel):
         require_non_empty(self.target_artifact_id, "target_artifact_id")
         require_non_empty(self.message, "message")
         require_non_empty(self.required_action, "required_action")
+        require_non_empty(self.severity, "severity")
 
 
 @dataclass(frozen=True)

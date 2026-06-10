@@ -20,6 +20,8 @@ from competitive_intel_agents.runtime import (
     CachedWebFetch,
     DuckDuckGoSearch,
     FallbackSearch,
+    LocalContentStore,
+    PersistedContentTool,
     ToolRuntime,
     WebFetchTool,
     WebSearchTool,
@@ -304,7 +306,11 @@ def _make_model_runtime() -> ModelRuntime:
 def _real_web_harness(journal: JournalStore, workspace: LocalWorkspace | None):
     tools = ToolRuntime()
     tools.register(WebSearchTool(FallbackSearch([BingSearch(), DuckDuckGoSearch(timeout=2)])))
-    fetch_tool = WebFetchTool()
+    content_root = (workspace.path if workspace is not None else Path(".competitive-intel")) / "content"
+    fetch_tool = PersistedContentTool(
+        WebFetchTool(max_chars=None),
+        content_store=LocalContentStore(content_root),
+    )
     if workspace is not None:
         tools.register(
             CachedWebFetch(

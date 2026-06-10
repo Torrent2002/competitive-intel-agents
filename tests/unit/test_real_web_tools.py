@@ -3,6 +3,8 @@ from pathlib import Path
 from competitive_intel_agents.runtime import (
     BingSearch,
     CachedWebFetch,
+    LocalContentStore,
+    PersistedContentTool,
     FallbackSearch,
     DuckDuckGoSearch,
     HttpClient,
@@ -137,6 +139,39 @@ def test_web_fetch_tool_extracts_title_and_text_preview() -> None:
     assert "Hello" in result["content"]
     assert "ignore" not in result["content"]
     assert len(result["content"]) <= 40
+
+
+def test_persisted_content_tool_stores_full_text_and_returns_reference(tmp_path: Path) -> None:
+    class LargeTextTool:
+        name = "web_fetch"
+
+        def run(self, args: dict) -> dict:
+            return {
+                "url": args["url"],
+                "title": "Long page",
+                "content": "Alpha Beta Gamma " * 200,
+            }
+
+    tool = PersistedContentTool(
+        LargeTextTool(),
+        content_store=LocalContentStore(tmp_path / "content"),
+        summary_chars=80,
+        preview_chars=30,
+    )
+
+    result = tool.run({"url": "https://example.com/long"})
+
+    assert result["url"] == "https://example.com/long"
+    assert result["title"] == "Long page"
+    assert result["content_ref"].startswith("file:")
+    assert result["content_hash"]
+    assert result["char_count"] == len("Alpha Beta Gamma " * 200)
+    assert result["summary"] == ("Alpha Beta Gamma " * 200)[:80]
+    assert result["preview"] == ("Alpha Beta Gamma " * 200)[:30]
+    assert result["content"] == result["summary"]
+
+    path = Path(result["content_ref"].removeprefix("file:"))
+    assert path.read_text(encoding="utf-8") == "Alpha Beta Gamma " * 200
 
 
 def test_cached_web_fetch_reuses_workspace_cache(tmp_path: Path) -> None:

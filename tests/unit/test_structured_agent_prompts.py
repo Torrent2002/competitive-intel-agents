@@ -21,6 +21,45 @@ def test_prompt_library_builds_role_specific_messages() -> None:
     assert "source_001" in request.messages[1]["content"]
 
 
+def test_agent_prompts_include_operating_contract_sections() -> None:
+    library = AgentPromptLibrary()
+
+    for agent in ("collector", "analyst", "writer", "reviewer"):
+        prompt = library.build(agent, "Do the task.", {}).messages[0]["content"]
+
+        assert "Role" in prompt
+        assert "Inputs" in prompt
+        assert "Outputs" in prompt
+        assert "Escalation" in prompt
+        assert "Self-check" in prompt
+        assert "Evidence access" in prompt
+
+
+def test_reviewer_prompt_defines_feedback_routing_rules() -> None:
+    prompt = AgentPromptLibrary().build(
+        "reviewer",
+        "Review the report.",
+        {},
+    ).messages[0]["content"]
+
+    assert "missing_source -> collector" in prompt
+    assert "unsupported_claim -> analyst" in prompt
+    assert "missing_section -> writer" in prompt
+    assert "source summary only contains keywords" in prompt
+
+
+def test_analyst_prompt_uses_content_ref_for_full_evidence() -> None:
+    prompt = AgentPromptLibrary().build(
+        "analyst",
+        "Create claims.",
+        {},
+    ).messages[0]["content"]
+
+    assert "content_ref" in prompt
+    assert "summary is not enough" in prompt
+    assert "Do not create claims from hidden knowledge" in prompt
+
+
 def test_validator_rejects_claims_without_source_ids() -> None:
     validator = StructuredOutputValidator()
 

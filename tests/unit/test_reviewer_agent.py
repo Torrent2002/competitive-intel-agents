@@ -1,3 +1,5 @@
+import json
+
 from competitive_intel_agents.agents import ReviewerAgent
 from competitive_intel_agents.artifacts import InMemoryArtifactStore
 from competitive_intel_agents.harness import InMemoryCheckpointStore, RuntimeHarness
@@ -7,11 +9,26 @@ from competitive_intel_agents.models import (
     AgentState,
     AnalysisClaim,
     CompetitiveIntelRequest,
+    ModelResponse,
     ReportDraft,
     RunContext,
     SourceArtifact,
 )
 from competitive_intel_agents.runtime import ToolRuntime
+
+
+def context_payload(model_request):
+    return json.loads(model_request.messages[1]["content"].split("Context JSON:\n", 1)[1])
+
+
+class CapturingModelRuntime:
+    def __init__(self, parsed):
+        self.parsed = parsed
+        self.requests = []
+
+    def complete(self, request):
+        self.requests.append(request)
+        return ModelResponse(ok=True, parsed=self.parsed)
 
 
 def make_context(run_id: str = "run_001") -> RunContext:
@@ -50,7 +67,11 @@ def save_source(
     store: InMemoryArtifactStore,
     source_id: str = "source_001",
     entity: str | None = "Acme",
+    metadata: dict | None = None,
 ) -> None:
+    source_metadata = dict(metadata or {})
+    if entity:
+        source_metadata["entity"] = entity
     store.save_source(
         SourceArtifact(
             id=source_id,
@@ -58,7 +79,7 @@ def save_source(
             url=f"https://example.com/{source_id}",
             title="Example source",
             snippet="Evidence snippet.",
-            metadata={"entity": entity} if entity else {},
+            metadata=source_metadata,
         )
     )
 
@@ -124,6 +145,41 @@ def test_reviewer_approves_fully_sourced_report() -> None:
     assert result.output_artifact_ids == ["report_run_001_001"]
     assert result.tool_calls == []
     assert result.review_feedback == []
+
+
+def test_reviewer_model_context_includes_request_coverage_gaps_and_source_refs() -> None:
+    store = InMemoryArtifactStore()
+    save_source(
+        store,
+        "source_001",
+        entity="Acme",
+        metadata={
+            "dimension": "pricing",
+            "content_ref": "content/run_001/source_001.txt",
+            "content_hash": "abc123",
+            "char_count": 4096,
+            "summary": "Acme pricing summary",
+            "source_type": "official",
+        },
+    )
+    save_claim(store, "claim_001", source_ids=["source_001"])
+    save_report(store, claim_ids=["claim_001"], source_ids=["source_001"])
+    runtime = CapturingModelRuntime({"feedback": []})
+    reviewer = ReviewerAgent(store, model_runtime=runtime)
+
+    reviewer.run_round(
+        make_question_context("pricing"),
+        AgentState(agent="reviewer"),
+    )
+
+    payload = context_payload(runtime.requests[0])
+    assert payload["request"]["company"] == "Acme"
+    assert payload["request"]["competitors"] == ["Beta"]
+    assert payload["request"]["questions"] == ["pricing"]
+    assert payload["coverage"]["missing_entities"] == ["Beta"]
+    assert payload["coverage"]["source_count"] == 1
+    assert payload["sources"]["source_001"]["content_ref"] == "content/run_001/source_001.txt"
+    assert payload["sources"]["source_001"]["metadata"]["char_count"] == 4096
 
 
 def test_reviewer_rejects_competitive_report_with_too_few_sources() -> None:
@@ -232,12 +288,16 @@ def test_reviewer_rejects_report_that_does_not_answer_user_question() -> None:
     )
 
     assert result.completed is False
-    assert any(
-        item.issue == "missing_source"
+    question_feedback = [
+        item
+        for item in result.review_feedback
+        if item.issue == "missing_source"
         and item.target_agent == "collector"
         and "受众定位" in item.message
-        for item in result.review_feedback
-    )
+    ]
+    assert question_feedback
+    assert question_feedback[0].question == "受众定位，市场份额，产品能力"
+    assert question_feedback[0].dimension == "受众定位, 市场份额, 产品能力"
 
 
 def test_reviewer_rejects_missing_sections_with_writer_feedback() -> None:

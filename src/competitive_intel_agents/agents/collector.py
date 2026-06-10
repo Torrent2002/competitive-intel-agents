@@ -6,6 +6,11 @@ import json as _json
 import sys as _sys
 
 from competitive_intel_agents.agents.base import BaseAgent
+from competitive_intel_agents.agents.prompt_context import (
+    coverage_payload,
+    request_payload,
+    sources_list_payload,
+)
 from competitive_intel_agents.artifacts import ArtifactStore
 from competitive_intel_agents.models import (
     AgentRoundResult,
@@ -418,10 +423,15 @@ class CollectorAgent(BaseAgent):
             self.name,
             task,
             {
+                "request": request_payload(context),
                 "company": context.request.company,
                 "competitors": context.request.competitors,
                 "questions": context.request.questions,
                 "market": context.request.market or "",
+                "coverage": coverage_payload(
+                    context,
+                    self._artifacts.list_sources(context.run_id),
+                ),
             },
         )
         resp = self._model_runtime.complete(model_req)
@@ -448,6 +458,7 @@ class CollectorAgent(BaseAgent):
         from competitive_intel_agents.prompts import AgentPromptLibrary
 
         prompt_lib = AgentPromptLibrary()
+        source_payloads = sources_list_payload(existing_sources or [], snippet_chars=300)
         titles = [s.title for s in existing_sources] if existing_sources else ["none"]
         task = (
             "The initial search found these sources but we need MORE and DIFFERENT ones. "
@@ -458,10 +469,13 @@ class CollectorAgent(BaseAgent):
             self.name,
             task,
             {
+                "request": request_payload(context),
                 "company": context.request.company,
                 "competitors": context.request.competitors,
                 "questions": context.request.questions,
                 "found_so_far": titles,
+                "sources": source_payloads,
+                "coverage": coverage_payload(context, existing_sources or []),
             },
         )
         resp = self._model_runtime.complete(model_req)
@@ -646,9 +660,16 @@ class CollectorAgent(BaseAgent):
 
             aid = self._next_source_id(context.run_id)
             title = tr.data.get("title", "") or url
-            snippet = tr.data.get("content", "") or tr.data.get("snippet", "") or ""
+            snippet = (
+                tr.data.get("summary", "")
+                or tr.data.get("content", "")
+                or tr.data.get("snippet", "")
+                or tr.data.get("preview", "")
+                or ""
+            )
             if self._model_runtime is not None and snippet:
                 title, snippet = self._model_extract(context, tr.data)
+            metadata = self._source_metadata(metadata, tr.data)
 
             source = SourceArtifact(
                 id=aid,
@@ -667,6 +688,21 @@ class CollectorAgent(BaseAgent):
 
         return saved
 
+    @staticmethod
+    def _source_metadata(base: dict, data: dict) -> dict:
+        metadata = dict(base)
+        for key in (
+            "content_ref",
+            "content_hash",
+            "char_count",
+            "summary",
+            "preview",
+            "content_field",
+        ):
+            if key in data and data[key] not in (None, ""):
+                metadata[key] = data[key]
+        return metadata
+
     def _is_relevant(self, context: RunContext, data: dict) -> bool:
         """Quick relevance check: does this page relate to our research?"""
         from competitive_intel_agents.prompts import AgentPromptLibrary
@@ -684,9 +720,14 @@ class CollectorAgent(BaseAgent):
             self.name,
             task,
             {
+                "request": request_payload(context),
                 "topic": f"{context.request.company} {context.request.questions} {context.request.competitors}",
                 "url": data.get("url", ""),
                 "content_sample": content,
+                "coverage": coverage_payload(
+                    context,
+                    self._artifacts.list_sources(context.run_id),
+                ),
             },
         )
         resp = self._model_runtime.complete(model_req)
@@ -712,9 +753,14 @@ class CollectorAgent(BaseAgent):
             self.name,
             task,
             {
+                "request": request_payload(context),
                 "url": data.get("url", ""),
                 "topic": str(context.request.questions),
                 "content": content,
+                "coverage": coverage_payload(
+                    context,
+                    self._artifacts.list_sources(context.run_id),
+                ),
             },
         )
         resp = self._model_runtime.complete(model_req)

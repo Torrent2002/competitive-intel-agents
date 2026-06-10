@@ -9,6 +9,10 @@ from competitive_intel_agents.runtime.model_runtime import (
     ModelRuntime,
     Provider,
 )
+from competitive_intel_agents.runtime.content_store import (
+    LocalContentStore,
+    PersistedContentTool,
+)
 from competitive_intel_agents.runtime.tool_runtime import (
     FakeWebFetch,
     FakeWebSearch,
@@ -38,7 +42,9 @@ __all__ = [
     "HttpClient",
     "HttpModelProvider",
     "JsonPostTransport",
+    "LocalContentStore",
     "ModelRuntime",
+    "PersistedContentTool",
     "Provider",
     "ToolPolicy",
     "ToolRuntime",

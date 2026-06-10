@@ -202,7 +202,7 @@ class WebFetchTool:
         self,
         http_client: HttpClient | None = None,
         timeout: float = 10.0,
-        max_chars: int = 2000,
+        max_chars: int | None = 2000,
     ) -> None:
         self._http_client = http_client or HttpClient()
         self._timeout = timeout
@@ -213,10 +213,13 @@ class WebFetchTool:
         if not url:
             raise ValueError("url is required")
         html_text = self._http_client.get_text(url, timeout=self._timeout)
+        content = _clean_html_text(html_text)
+        if self._max_chars is not None:
+            content = content[: self._max_chars]
         return {
             "url": url,
             "title": _extract_title(html_text) or url,
-            "content": _clean_html_text(html_text)[: self._max_chars],
+            "content": content,
         }
 
 

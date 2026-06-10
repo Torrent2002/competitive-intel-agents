@@ -25,7 +25,7 @@ def test_cli_run_prints_human_readable_summary() -> None:
     assert result.returncode == 0
     assert "Loaded request: tests/fixtures/request.json" in result.stdout
     assert "Run id: run_" in result.stdout
-    assert "Run status: rework_failed" in result.stdout
+    assert "Run status: needs_more_evidence" in result.stdout
     assert "Sources: " in result.stdout
     assert "Claims: 4" in result.stdout
     assert "Report id: report_" in result.stdout
@@ -53,7 +53,7 @@ def test_cli_run_accepts_config_and_fake_model_flags() -> None:
     )
 
     assert result.returncode == 0
-    assert "Run status: rework_failed" in result.stdout
+    assert "Run status: needs_more_evidence" in result.stdout
 
 
 def test_cli_run_accepts_real_web_flag_with_workspace_cache(tmp_path: Path) -> None:
@@ -103,7 +103,7 @@ def test_cli_run_persists_workspace_and_show_dashboard(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0
-    assert "Run status: rework_failed" in result.stdout
+    assert "Run status: needs_more_evidence" in result.stdout
     assert "Run:" in result.stdout
     assert "Status: needs_rework" in result.stdout
     assert "Agent rounds:" in result.stdout
@@ -150,7 +150,7 @@ def test_cli_runs_lists_persisted_runs(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert "Run id" in result.stdout
-    assert "rework_failed" in result.stdout
+    assert "needs_more_evidence" in result.stdout
 
 
 def test_cli_chat_runs_pipeline_and_accepts_inspection_commands(tmp_path: Path) -> None:

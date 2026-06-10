@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 from competitive_intel_agents.agents.base import BaseAgent
+from competitive_intel_agents.agents.prompt_context import (
+    claims_list_payload,
+    coverage_payload,
+    request_payload,
+    sources_map_payload,
+)
 from competitive_intel_agents.artifacts import ArtifactStore
 from competitive_intel_agents.models import (
     AgentRoundResult,
@@ -79,15 +85,16 @@ class WriterAgent(BaseAgent):
         from competitive_intel_agents.prompts import AgentPromptLibrary, StructuredOutputValidator
 
         prompt_lib = AgentPromptLibrary()
-        claims_json = [
-            {
-                "id": c.id,
-                "text": c.text,
-                "source_ids": c.source_ids,
-                "confidence": c.confidence,
-                "reasoning": c.reasoning,
-            }
-            for c in claims
+        claims_json = claims_list_payload(claims)
+        claim_source_ids = {
+            source_id
+            for claim in claims
+            for source_id in claim.source_ids
+        }
+        sources = [
+            source
+            for source in self._artifacts.list_sources(context.run_id)
+            if source.id in claim_source_ids
         ]
 
         task = (
@@ -103,10 +110,13 @@ class WriterAgent(BaseAgent):
             self.name,
             task,
             {
+                "request": request_payload(context),
                 "company": context.request.company,
                 "market": context.request.market,
                 "competitors": context.request.competitors,
                 "claims": claims_json,
+                "sources": sources_map_payload(sources),
+                "coverage": coverage_payload(context, sources),
             },
         )
         resp = self._model_runtime.complete(model_req)

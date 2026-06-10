@@ -1,0 +1,6 @@
+{
+  "provider": "openai-compatible",
+  "endpoint": "https://api.example.com/v1/chat/completions",
+  "api_key": "replace-with-your-api-key",
+  "model": "replace-with-your-model-name"
+}

@@ -43,6 +43,12 @@ class Orchestrator:
         "writer",
         "reviewer",
     )
+    REWORK_PRIORITY: tuple[AgentName, ...] = (
+        "collector",
+        "analyst",
+        "writer",
+        "reviewer",
+    )
 
     def __init__(
         self,
@@ -124,11 +130,12 @@ class Orchestrator:
         for _ in range(self._max_rework_attempts):
             if not remaining_feedback:
                 break
-            rework_result = loop.apply(context, remaining_feedback[0])
+            selected_feedback = self._select_upstream_feedback(remaining_feedback)
+            rework_result = loop.apply(context, selected_feedback)
             if rework_result.status != "applied":
                 return RunResult(
                     run_id=context.run_id,
-                    status="rework_failed",
+                    status=self._status_for_unresolved_feedback(remaining_feedback),
                     report_id=self._latest_report_id(context.run_id),
                     review_feedback=remaining_feedback,
                     error=rework_result.status,
@@ -153,11 +160,37 @@ class Orchestrator:
                 remaining_feedback = latest_reviewer[0].review_feedback
         return RunResult(
             run_id=context.run_id,
-            status="rework_failed",
+            status=self._status_for_unresolved_feedback(remaining_feedback),
             report_id=self._latest_report_id(context.run_id),
             review_feedback=remaining_feedback,
             error="max_rework_attempts_exceeded",
         )
+
+    def _select_upstream_feedback(
+        self,
+        feedback_items: list[ReviewFeedback],
+    ) -> ReviewFeedback:
+        for agent in self.REWORK_PRIORITY:
+            for feedback in feedback_items:
+                if feedback.target_agent == agent and feedback.blocking:
+                    return feedback
+            for feedback in feedback_items:
+                if feedback.target_agent == agent:
+                    return feedback
+        return feedback_items[0]
+
+    @staticmethod
+    def _status_for_unresolved_feedback(
+        feedback_items: list[ReviewFeedback],
+    ) -> str:
+        if feedback_items and all(
+            item.target_agent == "collector"
+            and item.issue == "missing_source"
+            and item.blocking
+            for item in feedback_items
+        ):
+            return "needs_more_evidence"
+        return "rework_failed"
 
     def _build_agents(self) -> list[Agent]:
         mr = self._model_runtime
@@ -213,6 +246,8 @@ class Orchestrator:
             target_artifact_id="collector_coverage",
             message=message,
             required_action=action,
+            severity="blocking",
+            blocking=True,
         )
 
     def _missing_source_entities(self, context: RunContext) -> list[str]:

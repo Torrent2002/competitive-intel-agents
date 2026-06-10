@@ -5,6 +5,11 @@ from __future__ import annotations
 import json
 
 from competitive_intel_agents.agents.base import BaseAgent
+from competitive_intel_agents.agents.prompt_context import (
+    coverage_payload,
+    request_payload,
+    sources_list_payload,
+)
 from competitive_intel_agents.artifacts import ArtifactStore
 from competitive_intel_agents.models import (
     AgentRoundResult,
@@ -97,15 +102,8 @@ class AnalystAgent(BaseAgent):
         if not unclaimed_sources:
             return []
 
-        sources_json = [
-            {
-                "id": s.id,
-                "title": s.title,
-                "url": s.url,
-                "snippet": s.snippet[:500],
-            }
-            for s in unclaimed_sources[:5]
-        ]
+        prompt_sources = unclaimed_sources[:5]
+        sources_json = sources_list_payload(prompt_sources, snippet_chars=500)
 
         task = (
             f"Analyze the following sources about {context.request.company} "
@@ -119,9 +117,11 @@ class AnalystAgent(BaseAgent):
             self.name,
             task,
             {
+                "request": request_payload(context),
                 "company": context.request.company,
                 "competitors": context.request.competitors,
                 "sources": sources_json,
+                "coverage": coverage_payload(context, sources),
             },
         )
         resp = self._model_runtime.complete(model_req)

@@ -18,6 +18,8 @@ from competitive_intel_agents.runtime import (
     CachedWebFetch,
     DuckDuckGoSearch,
     FallbackSearch,
+    LocalContentStore,
+    PersistedContentTool,
     ToolRuntime,
     WebFetchTool,
     WebSearchTool,
@@ -46,6 +48,7 @@ _STYLE = (
     "font-size:.8em;font-weight:600;}\n"
     ".status.completed{background:#d1fae5;color:#065f46;}\n"
     ".status.needs_rework{background:#fef3c7;color:#92400e;}\n"
+    ".status.needs_more_evidence{background:#ffedd5;color:#9a3412;}\n"
     ".status.aborted{background:#fee2e2;color:#991b1b;}\n"
     ".status.running,.status.empty{background:#dbeafe;color:#1e40af;}\n"
     ".meta{color:#6b7280;font-size:.85em;margin:.25rem 0;}\n"
@@ -111,7 +114,35 @@ _STYLE = (
     "@keyframes thinking-dot{0%,80%,100%{transform:translateY(0);opacity:.35;}40%{transform:translateY(-7px);opacity:1;}}\n"
     "@keyframes agent-sheen{0%{transform:translateX(-100%);}100%{transform:translateX(100%);}}\n"
     "@keyframes agent-glow{0%{filter:hue-rotate(0deg);}100%{filter:hue-rotate(360deg);}}\n"
+    ".map-toolbar{display:flex;gap:.5rem;flex-wrap:wrap;margin:0 0 1rem;}\n"
+    ".flow-map{display:flex;gap:.55rem;align-items:stretch;margin:1rem 0 1.25rem;}\n"
+    ".flow-node{position:relative;flex:1 1 0;min-width:0;background:#fff;border:1px solid #dbe3ee;border-radius:8px;"
+    "padding:1rem;min-height:140px;box-shadow:0 1px 2px rgba(15,23,42,.04);}\n"
+    ".flow-node::before{content:\"\";position:absolute;inset:0 0 auto 0;height:3px;background:#2563eb;}\n"
+    ".flow-node.orchestrator::before{background:#0f766e;}\n"
+    ".flow-node.status-node::before{background:#22c55e;}\n"
+    ".flow-title{margin:0;color:#0f172a;font-size:1rem;}\n"
+    ".flow-copy{color:#64748b;font-size:.84rem;margin:.35rem 0 0;}\n"
+    ".flow-arrow{align-self:center;flex:0 0 18px;text-align:center;color:#2563eb;font-weight:800;}\n"
+    ".flow-paths{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:.75rem;}\n"
+    ".path-card{background:#fff;border:1px solid #e5e7eb;border-left:4px solid #2563eb;"
+    "border-radius:8px;padding:.85rem;}\n"
+    ".path-card.rework{border-left-color:#f59e0b;}\n"
+    ".path-card.failed{border-left-color:#ef4444;}\n"
+    ".path-card.approved{border-left-color:#22c55e;}\n"
+    ".path-label{display:block;color:#0f172a;font-weight:700;margin-bottom:.25rem;}\n"
+    ".contract-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));"
+    "gap:.75rem;margin:0;padding:0;list-style:none;}\n"
+    ".contract-list li{background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:.85rem;}\n"
+    ".contract-list strong{display:block;color:#0f172a;margin-bottom:.2rem;}\n"
+    ".feedback-flow{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:.75rem;}\n"
+    ".feedback-flow-card{background:#fff;border:1px solid #e5e7eb;border-left:4px solid #f59e0b;"
+    "border-radius:8px;padding:.9rem;}\n"
+    ".feedback-flow-card.evidence{border-left-color:#ef4444;}\n"
+    ".flow-route{font-weight:800;color:#0f172a;margin:.35rem 0;}\n"
+    ".flow-detail{color:#475569;font-size:.86rem;margin:.25rem 0;}\n"
     "@media (max-width:820px){.workflow{grid-template-columns:repeat(2,minmax(0,1fr));}}\n"
+    "@media (max-width:900px){.flow-map{flex-direction:column;}.flow-arrow{text-align:left;transform:rotate(90deg);}}\n"
     "@media (max-width:520px){.workflow{grid-template-columns:1fr;}body{padding:1rem;}}\n"
     "section{margin-bottom:1.5rem;}\n"
     "</style>\n"
@@ -147,10 +178,70 @@ def render_run_list(workspace: "LocalWorkspace") -> str:
         "<title>Competitive Intel — Runs</title>\n"
         f"{_STYLE}</head>\n<body>\n"
         "<h1>Competitive Intel Operator Console</h1>\n"
+        '<div class="map-toolbar"><a class="button secondary" href="/workflow">Workflow Map</a></div>\n'
         f"{_render_run_form()}"
         "<h2>Runs</h2>\n"
         f"<p>{len(results)} run(s)</p>\n"
         f"{rows}"
+        "\n</body>\n</html>\n"
+    )
+
+
+def render_workflow_map() -> str:
+    """Render a static map of possible orchestration and agent data paths."""
+    return (
+        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
+        "<meta charset=\"utf-8\">\n"
+        "<title>Agent Workflow Map — Competitive Intel</title>\n"
+        f"{_STYLE}</head>\n<body>\n"
+        '<p class="back-link"><a href="/">&larr; Back to runs</a></p>\n'
+        "<h1>Agent Workflow Map</h1>\n"
+        "<section class=\"panel\"><h2>Primary Path</h2>\n"
+        "<div class=\"flow-map\">\n"
+        f"{_flow_node('request', 'User Request', 'Company, competitors, market, and user questions enter as the run contract.')}"
+        f"{_flow_arrow('normal')}"
+        f"{_flow_node('orchestrator', 'Orchestrator', 'Creates context, runs agents, applies rework priority, and decides terminal status.')}"
+        f"{_flow_arrow('normal')}"
+        f"{_flow_node('collector', 'Collector', 'Collects sources and records coverage attempts, partial coverage, and tool health.')}"
+        f"{_flow_arrow('normal')}"
+        f"{_flow_node('analyst', 'Analyst', 'Turns active sources into sourced claims tied to product and competitor evidence.')}"
+        f"{_flow_arrow('normal')}"
+        f"{_flow_node('writer', 'Writer', 'Composes the report from claims and preserves claim/source references.')}"
+        f"{_flow_arrow('normal')}"
+        f"{_flow_node('reviewer', 'Reviewer', 'Checks evidence, user-question coverage, competitor coverage, and report clarity.')}"
+        f"{_flow_arrow('normal')}"
+        f"{_flow_node('status-node', 'Report / Final Status', 'Ends as approved, needs_more_evidence, rework_failed, needs_rework, or aborted.')}"
+        "</div></section>\n"
+        "<section><h2>Possible Rework Paths</h2>\n"
+        "<div class=\"flow-paths\">\n"
+        f"{_path_card('rework', 'Reviewer → Collector', 'missing_source, incomplete competitor coverage, or unanswered user-question dimensions without evidence.')}"
+        f"{_path_card('rework', 'Reviewer → Analyst', 'Sources exist, but claims do not cover the entity, dimension, or source evidence.')}"
+        f"{_path_card('rework', 'Reviewer → Writer', 'Claims exist, but the report omits the answer, section, or clear presentation.')}"
+        f"{_path_card('rework', 'Orchestrator → Upstream Agent', 'When multiple feedback items exist, the earliest upstream blocker runs first: collector, analyst, writer, reviewer.')}"
+        "</div></section>\n"
+        "<section><h2>Terminal Outcomes</h2>\n"
+        "<div class=\"flow-paths\">\n"
+        f"{_path_card('approved', 'Reviewer → approved', 'All blocking evidence, claim, report, and user-question checks pass.')}"
+        f"{_path_card('failed', 'Orchestrator → needs_more_evidence', 'Collector missing_source blockers remain after bounded rework attempts.')}"
+        f"{_path_card('failed', 'Orchestrator → rework_failed', 'Non-collector blockers remain after bounded rework attempts.')}"
+        f"{_path_card('failed', 'Any Agent → aborted', 'An agent exceeds retry limits or returns an abort decision.')}"
+        "</div></section>\n"
+        "<section><h2>Legend</h2>\n"
+        "<div class=\"flow-paths\">\n"
+        f"{_path_card('normal', 'Blue', 'Normal forward data flow.')}"
+        f"{_path_card('rework', 'Orange', 'Reviewer feedback loop.')}"
+        f"{_path_card('approved', 'Green', 'Approved terminal path.')}"
+        f"{_path_card('failed', 'Red', 'Blocked, failed, or aborted terminal path.')}"
+        "</div></section>\n"
+        "<section class=\"panel\"><h2>Agent Contract</h2>\n"
+        "<ul class=\"contract-list\">\n"
+        "<li><strong>Inputs and outputs</strong>Collector writes sources, Analyst writes sourced claims, Writer writes the report, Reviewer writes feedback or approval.</li>\n"
+        "<li><strong>Success</strong>Only approved is a successful final report.</li>\n"
+        "<li><strong>Evidence gap</strong>needs_more_evidence means collector missing_source blockers remain after bounded rework.</li>\n"
+        "<li><strong>Failure</strong>rework_failed means non-collector blockers remain; aborted means execution stopped.</li>\n"
+        "<li><strong>Routing priority</strong>collector → analyst → writer → reviewer.</li>\n"
+        "<li><strong>Feedback ownership</strong>Reviewer feedback targets the earliest agent that can fix the root cause.</li>\n"
+        "</ul></section>\n"
         "\n</body>\n</html>\n"
     )
 
@@ -164,7 +255,11 @@ def render_run_detail(workspace: "LocalWorkspace", run_id: str) -> str | None:
     snapshot = build_dashboard_snapshot(
         workspace.journal, workspace.artifacts, run_id
     )
-    display_status = result.status if result.status == "running" else snapshot.status
+    display_status = (
+        result.status
+        if result.status in {"running", "needs_more_evidence"}
+        else snapshot.status
+    )
     sources = workspace.artifacts.list_sources(run_id)
     claims = workspace.artifacts.list_claims(run_id)
     report = workspace.artifacts.get_latest_report(run_id)
@@ -173,10 +268,11 @@ def render_run_detail(workspace: "LocalWorkspace", run_id: str) -> str | None:
     # Sources table
     sources_rows = ""
     for s in sources:
+        source_detail = _source_detail_html(s)
         sources_rows += (
             f"<tr><td><code>{_esc(s.id)}</code></td>"
             f"<td><a href=\"{_esc(s.url)}\">{_esc(s.title)}</a></td>"
-            f"<td>{_esc(s.snippet[:200])}</td></tr>\n"
+            f"<td>{source_detail}</td></tr>\n"
         )
 
     # Claims table
@@ -198,7 +294,7 @@ def render_run_detail(workspace: "LocalWorkspace", run_id: str) -> str | None:
                 f"<h3>{_esc(section)}</h3>\n"
                 f"<div>{_esc(content)}</div>\n"
             )
-    elif result.status in {"aborted", "rework_failed"}:
+    elif result.status in {"aborted", "rework_failed", "needs_more_evidence"}:
         report_html = "<p class=\"meta\">No report was produced because the run ended before writer.</p>\n"
 
     # Reviewer feedback
@@ -216,6 +312,7 @@ def render_run_detail(workspace: "LocalWorkspace", run_id: str) -> str | None:
             f"<section><h2>Reviewer Feedback ({len(result.review_feedback)})</h2>"
             f"<ul>{items}</ul></section>"
         )
+    feedback_flow_html = _render_feedback_flow(result)
 
     # Journal events
     events_rows = ""
@@ -243,12 +340,7 @@ def render_run_detail(workspace: "LocalWorkspace", run_id: str) -> str | None:
         if result.status == "running"
         else ""
     )
-    running_notice_html = (
-        '<section class="panel"><p>Analysis is running. '
-        "This page refreshes every 2 seconds.</p></section>"
-        if result.status == "running"
-        else ""
-    )
+    running_notice_html = _render_running_notice(events, result.status)
 
     return (
         "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
@@ -264,15 +356,17 @@ def render_run_detail(workspace: "LocalWorkspace", run_id: str) -> str | None:
         f" | Tool calls: {snapshot.tool_call_count}</p>\n"
         f"{running_notice_html}"
         f"{_render_export_actions(run_id) if report is not None else ''}"
+        f'<div class="map-toolbar"><a class="button secondary" href="/workflow">Workflow Map</a></div>\n'
         f"{_render_agent_workflow(events, result.status)}"
         f"<section><h2>Report</h2>\n{report_html}</section>\n"
         f"<section><h2>Sources ({len(sources)})</h2>\n"
-        f"<table><tr><th>ID</th><th>Title</th><th>Snippet</th></tr>"
+        f"<table><tr><th>ID</th><th>Title</th><th>Details</th></tr>"
         f"{sources_rows}</table></section>\n"
         f"<section><h2>Claims ({len(claims)})</h2>\n"
         f"<table><tr><th>ID</th><th>Text</th><th>Confidence</th><th>Source IDs</th></tr>"
         f"{claims_rows}</table></section>\n"
         f"{feedback_html}"
+        f"{feedback_flow_html}"
         f"<section><h2>Journal Events ({len(events)})</h2>\n"
         f"<table><tr><th>ID</th><th>Agent</th><th>Round</th><th>Decision</th>"
         f"<th>Signals</th><th>Details</th></tr>"
@@ -319,6 +413,121 @@ def _render_agent_workflow(events, run_status: str) -> str:
     )
 
 
+def _render_running_notice(events, run_status: str) -> str:
+    if run_status != "running":
+        return ""
+
+    agent_order = [agent for agent, _, _ in _WORKFLOW_AGENTS]
+    states: dict[str, dict[str, object]] = {
+        agent: {"status": "pending", "rounds": 0, "decision": "-"}
+        for agent in agent_order
+    }
+    for agent in agent_order:
+        agent_events = [event for event in events if event.agent == agent]
+        if agent_events:
+            states[agent] = {
+                "status": "done",
+                "rounds": len(agent_events),
+                "decision": agent_events[-1].decision,
+            }
+    active_agent = _infer_running_agent(events, states, agent_order)
+    active_label = _agent_label(active_agent) if active_agent else "Unknown"
+    latest = events[-1] if events else None
+    latest_text = (
+        f"Last completed event: {latest.agent} {latest.decision}"
+        if latest is not None
+        else "No completed agent event yet"
+    )
+    active_rounds = 0
+    if active_agent:
+        active_rounds = sum(1 for event in events if event.agent == active_agent)
+    waiting_text = (
+        f"{active_label} is waiting for its first round event. "
+        "For model-backed runs, this usually means the model call is still in progress."
+        if active_agent and active_rounds == 0
+        else f"{active_label} has {active_rounds} recorded round(s)."
+    )
+    return (
+        '<section class="panel"><p>Analysis is running. '
+        "This page refreshes every 2 seconds.</p>"
+        f"<p class=\"meta\">Active agent: {_esc(active_label)}. "
+        f"{_esc(waiting_text)} {_esc(latest_text)}.</p></section>"
+    )
+
+
+def _agent_label(agent: str | None) -> str:
+    labels = {agent_id: label for agent_id, label, _ in _WORKFLOW_AGENTS}
+    return labels.get(agent or "", agent.title() if agent else "Unknown")
+
+
+def _source_detail_html(source) -> str:
+    parts = [f"<div>{_esc(source.snippet[:200])}</div>"]
+    content_ref = source.metadata.get("content_ref")
+    if isinstance(content_ref, str) and content_ref:
+        parts.append(f'<div class="meta">Content: <code>{_esc(content_ref)}</code></div>')
+    char_count = source.metadata.get("char_count")
+    if isinstance(char_count, int):
+        parts.append(f'<div class="meta">{char_count} chars</div>')
+    return "".join(parts)
+
+
+def _render_feedback_flow(result: RunResult) -> str:
+    if not result.review_feedback:
+        return ""
+
+    notice = ""
+    if result.status == "needs_more_evidence":
+        notice = (
+            '<p class="meta"><strong>Evidence is still missing.</strong> '
+            "This run needs more source coverage rather than treating the pipeline as crashed.</p>"
+        )
+
+    cards = ""
+    for item in result.review_feedback:
+        route = " → ".join(_feedback_route_labels(item.target_agent))
+        details = ""
+        for label, value in (
+            ("Entity", item.entity),
+            ("Dimension", item.dimension),
+            ("Question", item.question),
+        ):
+            if value:
+                details += (
+                    f'<p class="flow-detail">{_esc(label)}: {_esc(value)}</p>'
+                )
+
+        css_class = (
+            "feedback-flow-card evidence"
+            if item.target_agent == "collector" and item.issue == "missing_source"
+            else "feedback-flow-card"
+        )
+        cards += (
+            f'<article class="{css_class}">'
+            f'<span class="path-label">{_esc(item.issue)} → {_esc(item.target_agent)}</span>'
+            f'<p class="flow-route">{_esc(route)}</p>'
+            f"{details}"
+            f'<p class="flow-detail">Action: {_esc(item.required_action)}</p>'
+            "</article>\n"
+        )
+
+    return (
+        '<section><h2>Reviewer Feedback Flow</h2>'
+        f"{notice}"
+        '<div class="feedback-flow">'
+        f"{cards}</div></section>"
+    )
+
+
+def _feedback_route_labels(target_agent: str) -> list[str]:
+    routes = {
+        "collector": ["Collector", "Analyst", "Writer", "Reviewer"],
+        "analyst": ["Analyst", "Writer", "Reviewer"],
+        "writer": ["Writer", "Reviewer"],
+        "reviewer": ["Reviewer"],
+    }
+    return routes.get(target_agent, [target_agent.title()])
+
+
 def _agent_workflow_states(events, run_status: str) -> dict[str, dict[str, object]]:
     agent_order = [agent for agent, _, _ in _WORKFLOW_AGENTS]
     states: dict[str, dict[str, object]] = {
@@ -354,8 +563,9 @@ def _agent_workflow_states(events, run_status: str) -> dict[str, dict[str, objec
     elif run_status in {"aborted", "rework_failed"}:
         _mark_terminal_agent(states, "aborted")
         _mark_pending_agents(states, "blocked")
-    elif run_status in {"needs_rework"}:
+    elif run_status in {"needs_rework", "needs_more_evidence"}:
         _mark_rework_targets(events, states)
+        _mark_pending_agents(states, "blocked")
 
     return states
 
@@ -447,6 +657,28 @@ def _render_export_actions(run_id: str) -> str:
     )
 
 
+def _flow_node(class_name: str, title: str, copy: str) -> str:
+    return (
+        f'<article class="flow-node {_esc(class_name)}">'
+        f'<h3 class="flow-title">{_esc(title)}</h3>'
+        f'<p class="flow-copy">{_esc(copy)}</p>'
+        "</article>\n"
+    )
+
+
+def _flow_arrow(kind: str) -> str:
+    return f'<div class="flow-arrow {_esc(kind)}">→</div>\n'
+
+
+def _path_card(kind: str, label: str, copy: str) -> str:
+    return (
+        f'<article class="path-card {_esc(kind)}">'
+        f'<span class="path-label">{_esc(label)}</span>'
+        f'<p class="flow-copy">{_esc(copy)}</p>'
+        "</article>\n"
+    )
+
+
 def create_run_from_form(
     workspace: "LocalWorkspace",
     form: dict[str, list[str]],
@@ -520,9 +752,13 @@ def _make_web_orchestrator(
 
     tools = ToolRuntime()
     tools.register(WebSearchTool(FallbackSearch([BingSearch(), DuckDuckGoSearch(timeout=2)])))
+    fetch_tool = PersistedContentTool(
+        WebFetchTool(max_chars=None),
+        content_store=LocalContentStore(workspace.path / "content"),
+    )
     tools.register(
         CachedWebFetch(
-            WebFetchTool(),
+            fetch_tool,
             cache_dir=workspace.path / "cache" / "web_fetch",
         )
     )
@@ -563,6 +799,8 @@ class WebDashboardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/":
             html = render_run_list(self.workspace)
             self._respond_html(200, html)
+        elif parsed.path == "/workflow":
+            self._respond_html(200, render_workflow_map())
         elif parsed.path.startswith("/runs/") and parsed.path.endswith("/export"):
             run_id = unquote(parsed.path[len("/runs/"):-len("/export")].strip("/"))
             query = parse_qs(parsed.query)

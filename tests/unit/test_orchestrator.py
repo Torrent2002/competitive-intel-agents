@@ -234,7 +234,30 @@ def test_orchestrator_recollects_before_writer_when_integrated_rework_enabled() 
 
 
 def test_orchestrator_returns_rework_failed_after_max_attempts() -> None:
-    harness = ReworkHarness()
+    class PersistentWriterFeedbackHarness:
+        def __init__(self) -> None:
+            self.reviewer_calls = 0
+
+        def run_agent(self, context, agent: BaseAgent) -> AgentResult:
+            if agent.name == "reviewer":
+                self.reviewer_calls += 1
+                return AgentResult(
+                    agent="reviewer",
+                    decision="rework",
+                    rounds=1,
+                    review_feedback=[
+                        ReviewFeedback(
+                            issue="missing_section",
+                            target_agent="writer",
+                            target_artifact_id="report_missing",
+                            message="Missing Pricing.",
+                            required_action="Add Pricing.",
+                        )
+                    ],
+                )
+            return AgentResult(agent=agent.name, decision="stop", rounds=1)
+
+    harness = PersistentWriterFeedbackHarness()
     orchestrator = Orchestrator(
         harness=harness,
         enable_rework=True,
@@ -245,4 +268,77 @@ def test_orchestrator_returns_rework_failed_after_max_attempts() -> None:
     result = orchestrator.run(make_request())
 
     assert result.status == "rework_failed"
+    assert result.review_feedback[0].target_agent == "writer"
+
+
+def test_orchestrator_prioritizes_upstream_feedback_when_multiple_targets_exist() -> None:
+    class MixedFeedbackHarness:
+        def __init__(self) -> None:
+            self.agents: list[str] = []
+            self.reviewer_calls = 0
+
+        def run_agent(self, context, agent: BaseAgent) -> AgentResult:
+            self.agents.append(agent.name)
+            if agent.name == "reviewer":
+                self.reviewer_calls += 1
+                if self.reviewer_calls == 1:
+                    return AgentResult(
+                        agent="reviewer",
+                        decision="rework",
+                        rounds=1,
+                        review_feedback=[
+                            ReviewFeedback(
+                                issue="missing_section",
+                                target_agent="writer",
+                                target_artifact_id="report_missing",
+                                message="Missing Pricing.",
+                                required_action="Add Pricing.",
+                            ),
+                            ReviewFeedback(
+                                issue="missing_source",
+                                target_agent="collector",
+                                target_artifact_id="source_missing",
+                                message="Missing competitor pricing source.",
+                                required_action="Collect competitor pricing evidence.",
+                            ),
+                        ],
+                    )
+            return AgentResult(agent=agent.name, decision="stop", rounds=1)
+
+    harness = MixedFeedbackHarness()
+    orchestrator = Orchestrator(
+        harness=harness,
+        enable_rework=True,
+        run_id_factory=lambda: "run_mixed_rework",
+    )
+
+    result = orchestrator.run(make_request())
+
+    assert result.status == "approved"
+    assert harness.agents == [
+        "collector",
+        "analyst",
+        "writer",
+        "reviewer",
+        "collector",
+        "analyst",
+        "writer",
+        "reviewer",
+    ]
+
+
+def test_orchestrator_reports_needs_more_evidence_for_persistent_collector_blockers() -> None:
+    harness = ReworkHarness()
+    orchestrator = Orchestrator(
+        harness=harness,
+        enable_rework=True,
+        max_rework_attempts=1,
+        run_id_factory=lambda: "run_needs_more_evidence",
+    )
+
+    result = orchestrator.run(make_request())
+
+    assert result.status == "needs_more_evidence"
+    assert result.error == "max_rework_attempts_exceeded"
+    assert result.review_feedback[0].issue == "missing_source"
     assert result.review_feedback[0].target_agent == "collector"

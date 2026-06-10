@@ -1,3 +1,5 @@
+import json
+
 from competitive_intel_agents.agents import WriterAgent
 from competitive_intel_agents.artifacts import InMemoryArtifactStore
 from competitive_intel_agents.harness import RuntimeHarness
@@ -7,9 +9,25 @@ from competitive_intel_agents.models import (
     AgentState,
     AnalysisClaim,
     CompetitiveIntelRequest,
+    ModelResponse,
     RunContext,
+    SourceArtifact,
 )
 from competitive_intel_agents.runtime import ToolRuntime
+
+
+def context_payload(model_request):
+    return json.loads(model_request.messages[1]["content"].split("Context JSON:\n", 1)[1])
+
+
+class CapturingModelRuntime:
+    def __init__(self, parsed):
+        self.parsed = parsed
+        self.requests = []
+
+    def complete(self, request):
+        self.requests.append(request)
+        return ModelResponse(ok=True, parsed=self.parsed)
 
 
 def make_context(max_rounds: int = 2) -> RunContext:
@@ -46,6 +64,23 @@ def save_claim(
             source_ids=source_ids,
             confidence=confidence,
             reasoning=f"Reasoning for {claim_id}",
+        )
+    )
+
+
+def save_source(
+    store: InMemoryArtifactStore,
+    source_id: str,
+    metadata: dict | None = None,
+) -> None:
+    store.save_source(
+        SourceArtifact(
+            id=source_id,
+            run_id="run_001",
+            url=f"https://example.com/{source_id}",
+            title=f"Source {source_id}",
+            snippet="Source summary.",
+            metadata=metadata or {},
         )
     )
 
@@ -143,3 +178,45 @@ def test_writer_can_run_through_harness_without_tools() -> None:
     assert result.decision == "stop"
     assert result.output_artifact_ids == ["report_run_001_001"]
     assert store.get_latest_report("run_001") is not None
+
+
+def test_writer_model_context_includes_request_coverage_and_claim_sources() -> None:
+    store = InMemoryArtifactStore()
+    save_source(
+        store,
+        "source_001",
+        metadata={
+            "entity": "ACME",
+            "dimension": "pricing",
+            "content_ref": "content/run_001/source_001.txt",
+            "char_count": 1024,
+        },
+    )
+    save_claim(
+        store,
+        "claim_001",
+        "ACME pricing is positioned for enterprise teams.",
+        ["source_001"],
+        confidence="high",
+    )
+    runtime = CapturingModelRuntime(
+        {
+            "sections": {
+                "Overview": "Overview [claim_001]",
+                "Feature comparison": "Comparison [claim_001]",
+                "Pricing": "Pricing [claim_001]",
+                "SWOT": "SWOT [claim_001]",
+                "Sources": "- source_001",
+            }
+        }
+    )
+    writer = WriterAgent(store, model_runtime=runtime)
+
+    writer.run_round(make_context(), AgentState(agent="writer", round=1))
+
+    payload = context_payload(runtime.requests[0])
+    assert payload["request"]["company"] == "ACME"
+    assert payload["request"]["competitors"] == ["Globex"]
+    assert payload["coverage"]["missing_entities"] == ["Globex"]
+    assert payload["sources"]["source_001"]["content_ref"] == "content/run_001/source_001.txt"
+    assert payload["claims"][0]["source_ids"] == ["source_001"]

@@ -3,6 +3,13 @@
 from __future__ import annotations
 
 from competitive_intel_agents.agents.base import BaseAgent
+from competitive_intel_agents.agents.prompt_context import (
+    claims_map_payload,
+    coverage_payload,
+    report_payload,
+    request_payload,
+    sources_map_payload,
+)
 from competitive_intel_agents.artifacts import ArtifactStore
 from competitive_intel_agents.models import (
     AgentRoundResult,
@@ -95,19 +102,9 @@ class ReviewerAgent(BaseAgent):
         from competitive_intel_agents.prompts import AgentPromptLibrary, StructuredOutputValidator
 
         prompt_lib = AgentPromptLibrary()
-        report_json = {
-            "sections": dict(report.sections),
-            "claim_ids": report.claim_ids,
-            "source_ids": report.source_ids,
-        }
-        claims_json = {
-            cid: {"text": c.text, "source_ids": c.source_ids, "confidence": c.confidence}
-            for cid, c in claims.items()
-        }
-        sources_json = {
-            sid: {"title": s.title, "url": s.url, "snippet": s.snippet[:300]}
-            for sid, s in sources.items()
-        }
+        report_json = report_payload(report)
+        claims_json = claims_map_payload(claims.values())
+        sources_json = sources_map_payload(sources.values(), snippet_chars=300)
 
         task = (
             f"Review this competitive intelligence report about {context.request.company}. "
@@ -125,9 +122,11 @@ class ReviewerAgent(BaseAgent):
             self.name,
             task,
             {
+                "request": request_payload(context),
                 "report": report_json,
                 "claims": claims_json,
                 "sources": sources_json,
+                "coverage": coverage_payload(context, sources.values()),
                 "user_questions": context.request.questions,
                 "competitors": context.request.competitors,
             },
@@ -324,6 +323,7 @@ class ReviewerAgent(BaseAgent):
                         "Collect more independent sources covering the product, "
                         "competitors, and comparison dimensions before approval."
                     ),
+                    dimension="competitive coverage",
                 )
             )
 
@@ -343,6 +343,8 @@ class ReviewerAgent(BaseAgent):
                         required_action=(
                             f"Collect at least one source specifically about {competitor}."
                         ),
+                        entity=competitor,
+                        dimension="competitor coverage",
                     )
                 )
                 continue
@@ -369,6 +371,8 @@ class ReviewerAgent(BaseAgent):
                             f"Create sourced claims about {competitor} and include "
                             "them in the report before approval."
                         ),
+                        entity=competitor,
+                        dimension="competitor claims",
                     )
                 )
 
@@ -414,6 +418,8 @@ class ReviewerAgent(BaseAgent):
                         required_action=(
                             f"Collect sources that directly cover: {missing}."
                         ),
+                        dimension=missing,
+                        question=question,
                     )
                 )
             elif not all(
@@ -430,6 +436,8 @@ class ReviewerAgent(BaseAgent):
                         required_action=(
                             f"Create sourced claims that answer: {missing}."
                         ),
+                        dimension=missing,
+                        question=question,
                     )
                 )
             else:
@@ -444,6 +452,8 @@ class ReviewerAgent(BaseAgent):
                         required_action=(
                             f"Revise the report to explicitly answer: {missing}."
                         ),
+                        dimension=missing,
+                        question=question,
                     )
                 )
         return feedback

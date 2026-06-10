@@ -13,7 +13,7 @@
   "max_reviewer_rejections": 6,
   "max_total_rounds": 15,
   "max_tool_calls": 100,
-  "terminal_status": "rework_failed",
+  "terminal_status": "needs_more_evidence",
   "terminal_decision": "rework",
   "require_reviewer": true,
   "max_rework_attempts": 2,
