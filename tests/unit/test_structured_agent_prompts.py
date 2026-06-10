@@ -46,6 +46,8 @@ def test_reviewer_prompt_defines_feedback_routing_rules() -> None:
     assert "unsupported_claim -> analyst" in prompt
     assert "missing_section -> writer" in prompt
     assert "source summary only contains keywords" in prompt
+    assert "compare report_history" in prompt
+    assert "prior_review_feedback" in prompt
 
 
 def test_analyst_prompt_uses_content_ref_for_full_evidence() -> None:
@@ -56,8 +58,23 @@ def test_analyst_prompt_uses_content_ref_for_full_evidence() -> None:
     ).messages[0]["content"]
 
     assert "content_ref" in prompt
+    assert "content_excerpt" in prompt
+    assert "read the full source text" in prompt
     assert "summary is not enough" in prompt
     assert "Do not create claims from hidden knowledge" in prompt
+
+
+def test_writer_prompt_uses_claims_and_full_source_context_without_inventing() -> None:
+    prompt = AgentPromptLibrary().build(
+        "writer",
+        "Write report.",
+        {},
+    ).messages[0]["content"]
+
+    assert "content_ref" in prompt
+    assert "content_excerpt" in prompt
+    assert "read the full source text" in prompt
+    assert "do not rely only on snippets" in prompt
 
 
 def test_validator_rejects_claims_without_source_ids() -> None:

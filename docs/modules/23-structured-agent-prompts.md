@@ -1,49 +1,143 @@
-# 模块 23：结构化 Agent Prompt 与输出校验（已完成）
+# 模块 23：结构化 Agent Prompt 与输出校验
 
-## 目标
+## Goal
 
-为 agent 提供稳定的 prompt 边界和结构化输出契约。模型输出须先校验，再进入 artifact store。四个 agent 已全部接入 model-backed 模式。
+Give each agent a clear prompt contract and validate model output before it
+enters the artifact workflow.
 
-## 当前实现
+## Prompt Contract
 
-- `AgentPromptLibrary`
-  - 按角色生成 `ModelRequest`，每个角色有独立 system prompt（均强制 "Return ONLY valid JSON"）：
-    - Collector：输出 `sources` 数组。
-    - Analyst：输出 `claims` 数组，每条 claim 必须携带 `source_ids`。
-    - Writer：输出 `sections` 对象。
-    - Reviewer：输出 `feedback` 数组，包含 `issue`、`target_agent`、`target_artifact_id`、`message`、`required_action`。
-  - 默认 `response_format="json"`、`temperature=0.0`。
-- `StructuredOutputValidator`
-  - Collector：`sources` 必须是 list。
-  - Analyst：每条 claim 必须有 `source_ids`。
-  - Writer：`sections` 必须是 dict（Reviewer 负责 source/claim 交叉覆盖校验）。
-  - Reviewer：feedback 必须可路由。
-- `ValidationError`：模型输出不满足契约时抛出，agent 自动 fallback 到模板。
+Each agent prompt should define:
 
-## Agent 接入状态
+- role and responsibility;
+- inputs it receives;
+- outputs it must produce;
+- evidence access rules;
+- escalation target when blocked;
+- self-check criteria.
 
-| Agent | fake 模式 | model-backed 模式 |
-|---|---|---|
-| Collector | 模板生成查询 + 硬编码 source 提取 | 模型生成多角度查询、相关性过滤、内容摘要 |
-| Analyst | 硬编码 `"{company} evidence from {source}"` | 模型读取 source 全文，输出结构化 claims（text/source_ids/confidence/reasoning） |
-| Writer | 模板填充 section | 模型撰写 5 个 section（Overview/Feature/Pricing/SWOT/Sources），每段 2-4 段文字 |
-| Reviewer | 规则检查（section/claim/source 完整性） | 规则检查 + 模型语义审查（弱推理、不清晰、深度不足） |
+## Agent-Specific Requirements
 
-## 架构边界
+### Collector
 
-Prompt library 构造请求，validator 校验结构。它们不写 artifact、不执行工具、不决定 DAG。Agent 的 model-backed 实现通过 `ModelRuntime` 调用，validator 校验失败时自动 fallback 到模板。
+Inputs:
 
-## 测试
+- user request;
+- competitors;
+- questions and normalized dimensions;
+- prior tool results;
+- optional `collector_rework_plan`.
 
-- `tests/unit/test_structured_agent_prompts.py`
-  - Prompt 包含角色 system prompt、任务和上下文。
-  - Analyst 无 source_ids 的 claim 被拒绝。
-  - Reviewer feedback 必须可路由。
+Outputs:
 
-## 完成标准
+- search/fetch tool calls;
+- source JSON when model extraction is used;
+- coverage and attempted signals.
 
-- [x] provider-backed agent 有稳定的 prompt/response 契约入口。
-- [x] 证据链约束在 artifact 写入前可校验。
-- [x] Reviewer feedback 保持 A2A 路由能力。
-- [x] 四个 agent 全部支持 model-backed 模式（`--real-model` 开关）。
-- [x] 模型输出解析失败时优雅 fallback，不阻塞 pipeline。
+Rules:
+
+- attempt product, competitor, comparison, and question coverage;
+- prioritize reviewer-targeted research plans;
+- preserve `content_ref` metadata when available.
+
+### Analyst
+
+Inputs:
+
+- active sources;
+- source metadata;
+- `content_ref`;
+- `content_excerpt`;
+- user request;
+- prior feedback.
+
+Outputs:
+
+- `AnalysisClaim` JSON with `source_ids`.
+
+Rules:
+
+- every factual claim needs at least one source id;
+- use source excerpts/refs, not hidden knowledge;
+- do not infer beyond the evidence.
+
+### Writer
+
+Inputs:
+
+- active claims;
+- active sources;
+- source metadata and excerpts;
+- user request;
+- prior feedback;
+- report history.
+
+Outputs:
+
+- `ReportDraft` sections JSON.
+
+Rules:
+
+- answer the user's questions explicitly;
+- cite claim/source ids in prose;
+- do not repeat one source summary across every section;
+- do not invent pricing, market share, or competitor facts.
+
+### Reviewer
+
+Inputs:
+
+- latest report;
+- claims;
+- sources;
+- source metadata;
+- coverage gaps;
+- original request and competitors;
+- report history;
+- prior_review_feedback.
+
+Outputs:
+
+- approval decision, or routable `ReviewFeedback`.
+
+Rules:
+
+- evaluate against the original user request;
+- check competitor coverage;
+- reject source-summary-only reports;
+- keep unresolved historical blocking feedback blocking;
+- route feedback to the earliest responsible agent.
+
+## Evidence Access
+
+Prompt context may include:
+
+- source summaries/snippets;
+- `content_ref`;
+- `content_excerpt` loaded from persisted content;
+- source quality and coverage metadata.
+
+Snippets are previews. `content_ref` / `content_excerpt` are the evidence path
+for deeper analysis.
+
+## Validation
+
+| Agent | Validator |
+|---|---|
+| Collector | `sources` must be a list |
+| Analyst | each claim must contain `source_ids` |
+| Writer | `sections` must be a dict |
+| Reviewer | feedback must contain `issue`, `target_agent`, `target_artifact_id`, `message`, and `required_action` |
+
+Invalid model output falls back to deterministic behavior instead of corrupting
+the artifact store.
+
+## Done Criteria
+
+- Agent prompts describe role, inputs, outputs, evidence access, escalation, and
+  self-checks.
+- Runtime context supplies the data the prompts require.
+- Reviewer can see request, competitors, coverage gaps, source metadata, report
+  history, and prior feedback.
+- Analyst and Writer are explicitly told to use full-source evidence through
+  `content_ref` / `content_excerpt`.

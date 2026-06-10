@@ -260,3 +260,39 @@ def test_analyst_model_context_includes_request_coverage_and_source_metadata() -
     assert payload["coverage"]["missing_entities"] == ["Globex"]
     assert payload["sources"][0]["content_ref"] == "content/run_001/source_001.txt"
     assert payload["sources"][0]["metadata"]["char_count"] == 2048
+
+
+def test_analyst_model_context_includes_content_ref_excerpt(tmp_path) -> None:
+    content_file = tmp_path / "source.txt"
+    content_file.write_text(
+        "Audience demographics: 18-35 readers dominate. Market share: top three.",
+        encoding="utf-8",
+    )
+    store = InMemoryArtifactStore()
+    save_source(
+        store,
+        "source_001",
+        entity="ACME",
+        metadata={
+            "content_ref": f"file:{content_file}",
+            "char_count": content_file.stat().st_size,
+        },
+    )
+    runtime = CapturingModelRuntime(
+        {
+            "claims": [
+                {
+                    "text": "ACME audience skews 18-35.",
+                    "source_ids": ["source_001"],
+                    "confidence": "high",
+                    "reasoning": "Full evidence text states the demographic.",
+                }
+            ]
+        }
+    )
+    analyst = AnalystAgent(store, target_claims=1, model_runtime=runtime)
+
+    analyst.run_round(make_context(), AgentState(agent="analyst", round=1))
+
+    payload = context_payload(runtime.requests[0])
+    assert "Audience demographics" in payload["sources"][0]["content_excerpt"]

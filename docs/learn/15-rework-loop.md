@@ -2,7 +2,7 @@
 
 ## 一句话概括
 
-**Rework Loop 把 Reviewer 的结构化反馈变成有预算、有路由、有版本链的自动返工，而不是让整个 pipeline 从头重跑或陷入无限循环。**
+**Rework Loop 把 Reviewer 的结构化反馈变成有预算、有路由、有版本链的自动返工；对于缺证据问题，它还会生成定向 collector research plan，而不是让 Collector 重新跑通用流程。**
 
 ---
 
@@ -14,50 +14,86 @@
 生成报告 -> 模型自评 -> 重新生成整份报告
 ```
 
-这有几个问题：
+问题是：
 
-- 无法精准定位是哪一步错了；
-- 修一个 claim 可能把整份报告都改乱；
+- 不知道根因是缺 source、claim 弱，还是 report 没写清；
+- 修一个 claim 可能把整份报告改乱；
 - 旧版本被覆盖，审计链断；
-- 如果 Reviewer 一直不满意，容易无限循环。
+- Reviewer 一直不满意时容易无限循环；
+- 缺少竞品证据时，下一轮仍然可能搜同一批泛化 query。
 
 本项目的做法是：
 
 ```text
-ReviewFeedback.target_agent
-  -> route to affected stage
-  -> replace affected artifact
-  -> rerun downstream only
-  -> preserve old artifacts for audit
+ReviewFeedback(target_agent, issue, entity, dimension, question)
+  -> route to earliest responsible stage
+  -> create replacement / reject stale downstream artifacts
+  -> for collector gaps, build collector_rework_plan
+  -> rerun target stage and downstream only
+  -> preserve old artifacts and journal events
 ```
-
-这就是 artifact-driven workflow 的价值。
 
 ---
 
 ## 2. 路由规则
-
-模块 15 的 v0 路由很明确：
 
 | feedback target | rerun sequence |
 |---|---|
 | collector | Collector -> Analyst -> Writer -> Reviewer |
 | analyst | Analyst -> Writer -> Reviewer |
 | writer | Writer -> Reviewer |
+| reviewer | Reviewer |
 
-例子：
+常见映射：
 
 ```text
 missing_source -> collector
-unsupported_claim -> analyst
-missing_section -> writer
+unsupported_claim / weak_inference -> analyst
+missing_section / unclear_writing / format_violation -> writer
 ```
 
-注意：路由不解析自然语言 `message`，而是信任 `ReviewFeedback.target_agent`。
+当多个 feedback 同时存在，orchestrator 优先选择最上游的 blocking target：
+
+```text
+collector -> analyst -> writer -> reviewer
+```
+
+这样系统不会在证据不足时先去润色报告。
 
 ---
 
-## 3. 版本链怎么做？
+## 3. Collector 缺口怎么变成 research plan
+
+Reviewer 反馈如果是：
+
+```text
+issue: missing_source
+target_agent: collector
+entity: 起点阅读
+dimension: market_share
+question: 比较番茄小说和起点阅读的用户规模与市场份额
+required_action: Collect competitor market share evidence
+```
+
+ReworkLoop 会写入：
+
+```python
+context.metadata["collector_rework_plan"] = [
+    {
+        "entity": "起点阅读",
+        "dimension": "market_share",
+        "question": "...",
+        "required_action": "..."
+    }
+]
+```
+
+Collector 下一轮优先执行这个 plan，并在 journal signal 中标记
+`targeted_rework_plan`。这比“缺信息就重跑所有 query”更接近真实研究流程。
+
+---
+
+## 4. 版本链怎么做？
 
 旧 artifact 不会被覆盖。
 
@@ -83,32 +119,45 @@ artifact_store.mark_superseded("report_001", "report_001_v2")
 
 这样：
 
-- 下游默认只读 active 的 `report_001_v2`；
-- `report_001` 仍然保留，可审计；
+- 下游默认只读 active 的新 artifact；
+- 旧 artifact 仍然保留，可审计；
 - lineage 校验能防止跨 run、跨 artifact type 的错误替换。
 
+对于 reviewer 指向的虚拟 coverage key，ReworkLoop 不会伪造 supersedes
+关系，而是生成下一个合法 artifact id，并把真实修复交给目标 agent。
+
 ---
 
-## 4. 为什么要 reject downstream artifacts？
+## 5. 为什么要 reject downstream artifacts？
 
-如果 Analyst 的 claim 被替换了，旧 report 可能还引用旧 claim。
+如果 Collector 补了 source，旧 claims 和 report 可能已经过时。
 
-所以模块 15 会把 stale report 标记为 `rejected`，强制 Writer 重新生成报告：
+所以 Collector rework 会 reject active claims 和 reports：
 
 ```text
-claim_001 -> claim_001_v2
-report_001 -> rejected
-Writer -> creates report_run_001_002
-Reviewer -> reviews latest report
+new source -> stale claims rejected -> Analyst rerun -> Writer rerun -> Reviewer rerun
 ```
 
-Collector rework 更上游，所以会 reject stale claims 和 reports。
-
-Writer rework 只需要替换 report，然后 rerun Writer/Reviewer；Writer 看到已有 active replacement report 时可以 no-op，Reviewer 会审最新 report。
+如果 Analyst 的 claim 被替换，旧 report 可能还引用旧 claim，所以也要
+reject stale report，强制 Writer 重新生成。
 
 ---
 
-## 5. 为什么要有 max attempts？
+## 6. Reviewer 为什么要看到历史
+
+Reviewer 现在不只看最新 report，还会收到：
+
+- 原始用户问题和 competitor list；
+- coverage gaps；
+- source metadata 和 content refs；
+- prior_review_feedback；
+- report_history。
+
+这样 reviewer 可以判断“上一轮指出的缺口是否真的解决了”，而不是只根据最新报告是否写得通顺来批准。
+
+---
+
+## 7. 为什么要有 max attempts？
 
 每个 feedback item 的 key 是：
 
@@ -116,48 +165,19 @@ Writer rework 只需要替换 report，然后 rerun Writer/Reviewer；Writer 看
 (issue, target_agent, target_artifact_id)
 ```
 
-默认最多尝试 2 次。
-
-如果同一个 feedback 一直修不好，返回：
+默认最多尝试 2 次。如果 collector missing_source 一直修不好，最终状态应是：
 
 ```text
-max_attempts_exceeded
+needs_more_evidence
 ```
 
-这比无限循环更工程化：后续可以把它交给人工处理、dashboard 展示或更高级的 planner。
+如果非 collector 的返工一直修不好，最终状态是：
 
----
-
-## 6. ArtifactStore 为模块 15 做了什么增强？
-
-Rework 需要读旧 artifact，即使它不是 active。
-
-所以 ArtifactStore 现在支持：
-
-```python
-get_artifact(artifact_id)
-list_sources(run_id, status=None)
-list_claims(run_id, status=None)
-list_reports(run_id, status=None)
+```text
+rework_failed
 ```
 
-默认读取仍然只返回 active，保护下游 agents；`status=None` 是审计、版本链和单调 id 生成用的。
-
----
-
-## 7. 面试可以怎么讲
-
-可以这样说：
-
-> Rework Loop 是 Reviewer feedback 的执行层。Reviewer 不只是给一句自然语言建议，而是返回 issue、target_agent 和 target_artifact_id。Rework Loop 根据 target_agent 决定从哪个阶段重跑，先创建合法 replacement artifact，用 version 和 supersedes_id 保留 lineage，再 reject stale downstream artifacts，最后通过 RuntimeHarness 重跑受影响阶段和下游阶段。整个过程有 max_attempts，避免无限返工。
-
-重点强调：
-
-- 不是从头重跑；
-- 不是覆盖旧 artifact；
-- 不是解析自然语言；
-- 有 attempt budget；
-- 所有改动都可审计。
+这两个状态比无限循环或假装完成更诚实。
 
 ---
 
@@ -170,8 +190,12 @@ test_routes_feedback_to_target_and_downstream_stages
 test_rework_supersedes_report_and_reruns_writer_then_reviewer
 test_rework_stops_after_max_attempts_for_same_feedback
 test_rework_rejects_stale_downstream_report_for_analyst_feedback
-test_get_artifact_returns_current_status_for_audit
-test_list_artifacts_can_include_all_statuses
+test_rework_builds_targeted_collector_plan_from_missing_source_feedback
+test_reviewer_receives_prior_feedback_and_report_history
 ```
 
-这些测试保证模块 15 的核心不是“模型觉得修好了”，而是可路由、可验证、可审计。
+---
+
+## 面试可以怎么讲
+
+> Rework Loop 是 reviewer feedback 的执行层。Reviewer 不只是给建议，而是返回 issue、target_agent、target_artifact_id，以及可选的 entity/dimension/question。ReworkLoop 根据 target_agent 选择从哪个阶段重跑，保留 artifact lineage，reject stale downstream artifacts，并把 collector missing_source 反馈转换成定向 research plan。这样补证据、补 claim、补 report 是三种不同路径，而不是整条 pipeline 盲目重跑。

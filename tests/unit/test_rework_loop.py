@@ -1,10 +1,15 @@
+from competitive_intel_agents.agents import CollectorAgent
 from competitive_intel_agents.artifacts import InMemoryArtifactStore
 from competitive_intel_agents.harness import RuntimeHarness
 from competitive_intel_agents.journal import InMemoryJournalStore
+from dataclasses import replace
+
 from competitive_intel_agents.models import (
     AgentProfile,
+    AgentState,
     AnalysisClaim,
     CompetitiveIntelRequest,
+    ModelResponse,
     ReportDraft,
     ReviewFeedback,
     RunContext,
@@ -12,6 +17,47 @@ from competitive_intel_agents.models import (
 )
 from competitive_intel_agents.rework import ReworkLoop, route_feedback
 from competitive_intel_agents.runtime import ToolRuntime
+
+
+class CapturingHarness:
+    def __init__(self) -> None:
+        self.contexts = []
+        self.agents = []
+
+    def run_agent(self, context, agent):
+        self.contexts.append(context)
+        self.agents.append(agent.name)
+        return type(
+            "AgentResult",
+            (),
+            {
+                "decision": "stop",
+            },
+        )()
+
+
+class CapturingModelRuntime:
+    def __init__(self) -> None:
+        self.agents: list[str] = []
+
+    def complete(self, request):
+        self.agents.append(request.agent)
+        if request.agent == "writer":
+            return ModelResponse(
+                ok=True,
+                parsed={
+                    "sections": {
+                        "Overview": "Overview [claim_001]",
+                        "Feature comparison": "Comparison [claim_001]",
+                        "Pricing": "Pricing [claim_001]",
+                        "SWOT": "SWOT [claim_001]",
+                        "Sources": "- source_001",
+                    }
+                },
+            )
+        if request.agent == "reviewer":
+            return ModelResponse(ok=True, parsed={"feedback": []})
+        return ModelResponse(ok=True, parsed={"claims": []})
 
 
 def make_context() -> RunContext:
@@ -119,6 +165,19 @@ def test_rework_supersedes_report_and_reruns_writer_then_reviewer() -> None:
     assert events[-1].decision == "stop"
 
 
+def test_rework_route_preserves_model_runtime_for_downstream_agents() -> None:
+    store = InMemoryArtifactStore()
+    save_report_fixture(store)
+    harness = RuntimeHarness(InMemoryJournalStore(), ToolRuntime())
+    model_runtime = CapturingModelRuntime()
+    loop = ReworkLoop(store, harness=harness, model_runtime=model_runtime)
+
+    loop.apply(make_context(), feedback("unsupported_claim", "analyst", "claim_001"))
+
+    assert "writer" in model_runtime.agents
+    assert "reviewer" in model_runtime.agents
+
+
 def test_rework_stops_after_max_attempts_for_same_feedback() -> None:
     store = InMemoryArtifactStore()
     save_report_fixture(store)
@@ -151,3 +210,60 @@ def test_rework_rejects_stale_downstream_report_for_analyst_feedback() -> None:
     assert store.get_artifact("claim_001_v2").supersedes_id == "claim_001"
     assert store.get_artifact("report_001").status == "rejected"
     assert store.get_latest_report("run_001").id == "report_run_001_002"
+
+
+def test_collector_rework_feedback_creates_targeted_research_plan() -> None:
+    store = InMemoryArtifactStore()
+    save_report_fixture(store)
+    harness = CapturingHarness()
+    loop = ReworkLoop(store, harness=harness)
+    item = ReviewFeedback(
+        issue="missing_source",
+        target_agent="collector",
+        target_artifact_id="question_coverage:market_share",
+        message="Market share and audience evidence is missing.",
+        required_action="Collect market share and audience evidence from third-party reports.",
+        entity="ACME",
+        dimension="market_share",
+        question="market share",
+    )
+
+    loop.apply(make_context(), item)
+
+    collector_context = harness.contexts[0]
+    plan = collector_context.metadata["collector_rework_plan"]
+    assert plan["entity"] == "ACME"
+    assert plan["dimension"] == "market_share"
+    assert plan["question"] == "market share"
+    assert any("market share" in query.lower() for query in plan["queries"])
+    assert any("QuestMobile" in query for query in plan["queries"])
+
+
+def test_collector_uses_targeted_rework_plan_before_generic_queries() -> None:
+    store = InMemoryArtifactStore()
+    context = replace(
+        make_context(),
+        metadata={
+            "collector_rework_plan": {
+                "entity": "ACME",
+                "entity_role": "self",
+                "dimension": "market_share",
+                "source_type": "data_provider",
+                "queries": [
+                    "ACME QuestMobile market share",
+                    "ACME market share MAU report",
+                ],
+            }
+        },
+    )
+    collector = CollectorAgent(store)
+
+    result = collector.run_round(context, AgentState(agent="collector", round=1))
+    queries = [call.args["query"] for call in result.tool_calls]
+
+    assert queries == [
+        "ACME QuestMobile market share",
+        "ACME market share MAU report",
+    ]
+    assert "targeted_rework_plan" in result.signals
+    assert all(call.args["metadata"]["dimension"] == "market_share" for call in result.tool_calls)

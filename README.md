@@ -44,46 +44,82 @@ In other words: the agent runtime is the engine; this project is the domain-spec
 ## Architecture
 
 ```
-User Input (company name / product)
+User Input (company / product / competitors / questions)
         │
         ▼
 ┌─────────────────────────────────────────────────┐
 │              Orchestrator                       │
 │   Builds run context, stores, profiles, DAG      │
 │   Enforces role sequence and rework boundaries   │
+│   Converts reviewer gaps into targeted plans     │
 └────────────────────┬────────────────────────────┘
                      │
-     ┌───────────────┼───────────────┐
-     ▼               ▼               ▼
-┌──────────┐   ┌──────────┐   ┌──────────┐
-│ Collector │   │ Analyst  │   │  Writer  │
-│  Agent    │   │  Agent   │   │  Agent   │
-├──────────┤   ├──────────┤   ├──────────┤
-│ Writes:  │   │ Writes:  │   │ Writes:  │
-│ Source-  │   │ sourced  │   │ report   │
-│ Artifact │   │ claims   │   │ draft    │
-│          │   │          │   │          │
-│ Tools:   │   │ Tools:   │   │ Tools:   │
-│ search + │   │ none     │   │ none     │
-│ fetch    │   │          │   │          │
-└────┬─────┘   └────┬─────┘   └────┬─────┘
-     │              │              │
-     └──────────────┼──────────────┘
-                    ▼
+                     ▼
+┌─────────────────────────────────────────────────┐
+│ Collector Agent                                  │
+│ Builds a research plan across product,           │
+│ competitors, and question dimensions. Uses        │
+│ search/fetch tools, persists full cleaned text,   │
+│ and writes SourceArtifact metadata.               │
+└────────────────────┬────────────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────────────┐
+│ Content Store                                    │
+│ Stores full fetched text under content_ref.       │
+│ SourceArtifact keeps summary, content_ref,        │
+│ content_hash, char_count, dimensions, quality.    │
+└────────────────────┬────────────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────────────┐
+│ Analyst Agent                                    │
+│ Reads source metadata plus content excerpts/refs. │
+│ Produces grounded AnalysisClaim objects with      │
+│ explicit source_ids.                              │
+└────────────────────┬────────────────────────────┘
+                     │
+                     ▼
+┌─────────────────────────────────────────────────┐
+│ Writer Agent                                     │
+│ Reads claims, sources, content refs, request,     │
+│ and prior feedback. Produces ReportDraft.         │
+└────────────────────┬────────────────────────────┘
+                     │
+                     ▼
 ┌─────────────────────────────────────────────────┐
 │           Quality Reviewer Agent                 │
-│   Checks claim source coverage and report shape  │
-│   Rejects with target agent + artifact id        │
-│   Feedback drives bounded downstream rework      │
+│   Sees the user request, competitors, coverage    │
+│   gaps, source metadata, report history, and      │
+│   prior feedback. Rejects with routable feedback. │
 └────────────────────┬────────────────────────────┘
                      │
               ┌──────┴──────┐
               ▼              ▼
-           Approve        Reject → Return to source agent
-              │
-              ▼
-     Source-backed Final Report
+           Approve        Reject
+              │              │
+              ▼              ▼
+     Source-backed      ReworkLoop routes to
+     Final Report       collector / analyst / writer
+                              │
+                              ▼
+                     Targeted rerun downstream
 ```
+
+The important loop is not "reviewer says no, rerun everything." It is:
+
+1. Collector attempts broad evidence coverage for the product, competitors, and
+   user questions.
+2. Fetch tools persist full cleaned page text locally and return a compact
+   summary plus `content_ref`.
+3. Analyst and Writer receive source metadata, excerpts, and refs so they can
+   work from evidence instead of snippets alone.
+4. Reviewer checks whether the latest report satisfies the original user
+   question, competitor coverage, coverage gaps, prior feedback, and report
+   history.
+5. If evidence is missing, ReworkLoop turns reviewer feedback into a targeted
+   `collector_rework_plan`; Collector prioritizes that plan before generic
+   collection and downstream stages rerun.
 
 ---
 
@@ -222,9 +258,9 @@ Per-run dashboard (terminal or basic web):
 │  Run: notion-competitive-analysis-20260603           │
 │  Status: ✅ Complete   Duration: 3m42s               │
 ├─────────────────────────────────────────────────────┤
-│  Collector │ ████████░░  8/10 rounds  │ ✅ Healthy  │
-│  Analyst   │ ██████████ 10/15 rounds  │ ⚠ Stall x1  │
-│  Writer    │ ██████░░░░  5/8 rounds   │ ✅ Healthy  │
+│  Collector │ ████████░░  8/10 rounds  │ Healthy     │
+│  Analyst   │ ██████████ 10/15 rounds  │ Stall x1    │
+│  Writer    │ ██████░░░░  5/8 rounds   │ Healthy     │
 │  Reviewer  │ ██░░░░░░░░  2/4 reviews  │ 1 rework    │
 ├─────────────────────────────────────────────────────┤
 │  Total Tokens: 48,200   Cost: ~$0.25                │
@@ -261,7 +297,7 @@ competitive-intel-agents/
 │   ├── prompts/          # Structured agent prompts
 │   ├── provenance/       # Causal provenance graph
 │   ├── rework/           # Bounded rework loop
-│   ├── runtime/          # Model/tool runtime and web tools
+│   ├── runtime/          # Model/tool runtime, web tools, content store
 │   ├── web/              # Web dashboard (stdlib http.server)
 │   ├── workspace/        # Persistent local workspace
 │   └── models.py         # Shared data contracts
@@ -300,7 +336,9 @@ Run an interactive terminal session:
 PYTHONPATH=src python -m competitive_intel_agents.cli chat
 ```
 
-Enable optional real Web collection for run or chat:
+Enable optional real Web collection for run or chat. In workspace mode, fetched
+pages are cleaned and persisted so downstream agents can use `content_ref`
+instead of relying only on short snippets:
 
 ```bash
 PYTHONPATH=src python -m competitive_intel_agents.cli run \
@@ -343,7 +381,8 @@ PYTHONPATH=src python -m competitive_intel_agents.cli golden \
   --root tests/golden
 ```
 
-Start a local web dashboard:
+Start a local web dashboard. Run details show the Agent Workflow first, then the
+tables, so the collaboration state is visible before the raw artifacts:
 
 ```bash
 PYTHONPATH=src python -m competitive_intel_agents.cli web \
@@ -420,7 +459,7 @@ See [troubleshooting](docs/troubleshooting.md) for common issues.
 
 ## Project Status
 
-**V1 (current)**: Full pipeline with role-bounded agents, CLI suite (run/chat/dashboard/export/web/golden), persistence, provenance, golden replay CI, and web dashboard.
+**V1 (current)**: Full pipeline with role-bounded agents, CLI suite (run/chat/dashboard/export/web/golden), persistence, provenance, golden replay CI, web dashboard, full source content persistence, structured agent prompts, and reviewer-guided targeted rework.
 
 **Phase 1**: Role-bounded artifact pipeline — source collection, sourced claims, structured draft, reviewer gate, round journaling, budget checks, repeated-tool circuit breaker.
 

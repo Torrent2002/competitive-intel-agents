@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Iterable
 
 from competitive_intel_agents.models import (
@@ -23,8 +24,16 @@ def request_payload(context: RunContext) -> dict:
     }
 
 
-def source_payload(source: SourceArtifact, snippet_chars: int = 1000) -> dict:
+def source_payload(
+    source: SourceArtifact,
+    snippet_chars: int = 1000,
+    content_excerpt_chars: int = 4000,
+) -> dict:
     metadata = dict(source.metadata)
+    content_excerpt = _content_excerpt(
+        metadata.get("content_ref"),
+        max_chars=content_excerpt_chars,
+    )
     return {
         "id": source.id,
         "title": source.title,
@@ -39,6 +48,7 @@ def source_payload(source: SourceArtifact, snippet_chars: int = 1000) -> dict:
         "char_count": metadata.get("char_count"),
         "summary": metadata.get("summary"),
         "preview": metadata.get("preview"),
+        "content_excerpt": content_excerpt,
         "metadata": metadata,
     }
 
@@ -80,10 +90,18 @@ def claims_map_payload(claims: Iterable[AnalysisClaim]) -> dict[str, dict]:
 
 def report_payload(report: ReportDraft) -> dict:
     return {
+        "id": report.id,
+        "status": report.status,
+        "version": report.version,
+        "supersedes_id": report.supersedes_id,
         "sections": dict(report.sections),
         "claim_ids": list(report.claim_ids),
         "source_ids": list(report.source_ids),
     }
+
+
+def report_history_payload(reports: Iterable[ReportDraft]) -> list[dict]:
+    return [report_payload(report) for report in reports]
 
 
 def coverage_payload(
@@ -151,3 +169,14 @@ def _question_has_dimension_match(
         if normalized_question in normalized_dimension:
             return True
     return False
+
+
+def _content_excerpt(content_ref: object, max_chars: int) -> str:
+    if not isinstance(content_ref, str) or not content_ref.startswith("file:"):
+        return ""
+    path = Path(content_ref.removeprefix("file:"))
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    return text[:max_chars]

@@ -59,7 +59,10 @@ class PersistedContentTool:
         self._preview_chars = preview_chars
 
     def run(self, args: dict) -> dict:
-        payload = dict(self._tool.run(args))
+        return self.persist_payload(self._tool.run(args))
+
+    def persist_payload(self, payload: dict) -> dict:
+        payload = dict(payload)
         field = next(
             (
                 key

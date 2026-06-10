@@ -125,6 +125,8 @@ class Orchestrator:
             self.artifacts,
             harness=self._harness,
             max_attempts=self._max_rework_attempts,
+            journal=self.journal,
+            model_runtime=self._model_runtime,
         )
         remaining_feedback = list(feedback_items)
         for _ in range(self._max_rework_attempts):
@@ -199,7 +201,7 @@ class Orchestrator:
             CollectorAgent(self.artifacts, target_sources=target_sources, model_runtime=mr),
             AnalystAgent(self.artifacts, model_runtime=mr),
             WriterAgent(self.artifacts, model_runtime=mr),
-            ReviewerAgent(self.artifacts, model_runtime=mr),
+            ReviewerAgent(self.artifacts, journal=self.journal, model_runtime=mr),
         ]
 
     def _latest_report_id(self, run_id: str) -> str | None:

@@ -2,32 +2,33 @@
 
 ## Goal
 
-Route reviewer feedback to the responsible agent and rerun only the needed part of the pipeline.
-
-Rework is the main reason this workflow is more than a single-agent prompt. A
-bad claim should not require throwing away the whole run; the system should
-replace the affected artifact and rerun only downstream stages.
+Route reviewer feedback to the responsible agent and rerun only the needed part
+of the pipeline. For missing evidence, convert reviewer gaps into a targeted
+collector research plan.
 
 ## Scope
 
 In scope:
 
 - Consume structured `ReviewFeedback`.
-- Map feedback issue to target agent.
+- Route feedback by `target_agent`.
+- Prefer the most upstream blocking feedback.
 - Limit rework attempts.
 - Supersede or reject old artifacts when a fix is produced.
-- Re-run downstream agents after a fix.
+- Reject stale downstream artifacts.
+- Re-run target and downstream agents through `RuntimeHarness`.
 - Preserve old artifacts for audit.
-- Create replacement artifacts with valid lineage.
 - Keep replacement artifacts inside the same `run_id` and artifact type.
-- Continue downstream stages even when the target stage has no extra new artifact to produce after the replacement has already been created.
+- Generate `collector_rework_plan` for blocking collector `missing_source`
+  feedback.
+- Preserve journal and model runtime while reworking so model-backed agents keep
+  the same context quality.
 
 Out of scope:
 
-- Complex planning.
 - Human-in-the-loop editing.
-- Parallel rework.
-- Semantic rewriting quality beyond deterministic v0 replacement notes.
+- Parallel rework planning.
+- Letting downstream agents collect new evidence directly.
 
 ## Public Interface
 
@@ -38,6 +39,8 @@ class ReworkLoop:
         artifacts: ArtifactStore,
         harness: Harness,
         max_attempts: int = 2,
+        journal: JournalStore | None = None,
+        model_runtime: ModelRuntime | None = None,
     ) -> None: ...
 
     def apply(self, context: RunContext, feedback: ReviewFeedback) -> ReworkResult: ...
@@ -47,76 +50,84 @@ def route_feedback(feedback: ReviewFeedback) -> list[AgentName]: ...
 
 `ReworkResult` contains:
 
-- `status`: `applied` or `max_attempts_exceeded`
-- `attempts`
-- `route`
-- `replacement_artifact_ids`
-- `final_decision`
+- `status`: `applied` or `max_attempts_exceeded`;
+- `attempts`;
+- `route`;
+- `replacement_artifact_ids`;
+- `final_decision`.
 
-## Routing v0
+## Routing
 
 | Target Agent | Re-run Sequence |
 |---|---|
 | Collector | Collector -> Analyst -> Writer -> Reviewer |
 | Analyst | Analyst -> Writer -> Reviewer |
 | Writer | Writer -> Reviewer |
+| Reviewer | Reviewer |
 
-Reviewer feedback already carries `target_agent`; v0 trusts that routing target
-instead of inferring intent from natural-language text.
+The orchestrator chooses the earliest blocking target when multiple feedback
+items exist:
+
+```text
+collector -> analyst -> writer -> reviewer
+```
+
+## Targeted Collector Plan
+
+For blocking `missing_source` feedback targeting Collector, ReworkLoop writes
+focused plan items into:
+
+```python
+context.metadata["collector_rework_plan"]
+```
+
+Each item should preserve:
+
+- `entity`;
+- `dimension`;
+- `question`;
+- `required_action`;
+- `issue`;
+- `target_artifact_id`.
+
+Collector must prioritize this plan before generic collection and emit
+`targeted_rework_plan` in health signals.
 
 ## Artifact State Rules
 
 - Rework creates replacement artifacts instead of mutating old ones.
-- Old artifacts should become `superseded` when replaced.
-- Artifacts explicitly rejected by the reviewer should become `rejected`.
-- Downstream agents should read only `active` artifacts by default.
-- Each feedback item has a max attempt count, default `2`.
-- Replacement artifacts must share the same `run_id` and artifact type as the old artifact.
-- Replacement artifacts must set `supersedes_id` to the old artifact id and advance `version`.
-- Missing artifact references can still create a new source placeholder for Collector feedback, but cannot supersede a non-existent artifact.
-- Upstream rework rejects stale downstream reports so Writer is forced to create a fresh report draft.
-- Collector rework rejects stale active claims and reports because source changes can invalidate downstream evidence chains.
-- Agent-generated ids must be monotonic across all artifact statuses to avoid duplicate ids after rejection or supersession.
+- Old artifacts become `superseded` when replaced.
+- Downstream stale artifacts become `rejected`.
+- Downstream agents read only `active` artifacts by default.
+- Each feedback key has a max attempt count.
+- Replacement artifacts must share the same `run_id` and artifact type as the
+  old artifact.
+- Replacement artifacts must set `supersedes_id` when replacing an existing
+  artifact.
+- Missing virtual artifact references can create a new artifact id, but cannot
+  supersede a non-existent artifact.
+- Agent-generated ids must be monotonic across all artifact statuses.
 
-## Current v0 Strategy
+## Terminal Status Semantics
 
-The loop is intentionally deterministic:
-
-1. Check attempt budget for the exact `(issue, target_agent, target_artifact_id)` tuple.
-2. Build a replacement artifact when the target artifact exists.
-3. Save the replacement with `version + 1` and `supersedes_id`.
-4. Mark the old artifact `superseded`.
-5. Reject stale downstream artifacts.
-6. Run the target stage and downstream stages through `RuntimeHarness`.
-
-The replacement content is minimal in v0. For example, a missing report section is
-filled from `ReviewFeedback.required_action`. Later model-backed rework can
-replace this deterministic patching without changing routing or lineage rules.
-
-## Rework Differentiation
-
-- `missing_source` should rerun Collector and then rerun downstream Analyst, Writer, Reviewer.
-- `unsupported_claim` and `weak_inference` should rerun Analyst and downstream stages.
-- `format_violation`, `missing_section`, and `unclear_writing` should rerun Writer and Reviewer.
-- Rework attempts should append journal events instead of overwriting the prior trail.
-- A bounded rework failure should produce an explicit run status, not an endless loop.
+- Unresolved collector `missing_source` blockers -> `needs_more_evidence`.
+- Unresolved non-collector blockers -> `rework_failed`.
+- Disabled or pending integrated rework -> `needs_rework`.
+- Reviewer approval -> `approved`.
 
 ## Tests
 
-- Routes `missing_source` to Collector.
-- Routes `unsupported_claim` to Analyst.
-- Routes `format_violation` to Writer.
-- Routes `missing_section` to Writer.
-- Supersedes old artifacts after successful rework.
-- Stops after max rework attempts.
-- Leaves rejected and superseded artifacts available for audit.
-- Reruns only the affected stage and downstream stages.
-- Rejects stale downstream reports after analyst/source rework.
-- Preserves valid version lineage for replacement artifacts.
+- Routes feedback to target and downstream stages.
+- Supersedes reports and reruns writer/reviewer.
+- Stops after max attempts.
+- Rejects stale downstream artifacts.
+- Builds targeted collector plans from missing-source feedback.
+- Preserves prior reports and feedback for reviewer context.
 
 ## Done Criteria
 
-- Reviewer rejection can lead to a bounded automatic rework.
+- Reviewer rejection can lead to bounded automatic rework.
+- Missing evidence triggers targeted collector collection.
 - Infinite rework loops are impossible.
-- The final report can explain which feedback was applied and which artifact was replaced.
-- Rework can be audited through artifact status and version chain.
+- Artifact lineage remains auditable.
+- Terminal status distinguishes evidence insufficiency from rework failure.

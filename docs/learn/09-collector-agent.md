@@ -1,113 +1,175 @@
-# 09 Collector Agent — 面试级学习笔记（v2）
+# 09 Collector Agent — 面试级学习笔记（v3）
 
 ## 一句话概括
 
-**Collector 是 pipeline 的信息入口：多角度搜索 → 域名去重 → 模型相关性过滤 → 结构化 source。模型驱动模式下，不是"搜一个词拿两条结果就停"，而是多轮迭代直到收集够高质量来源。**
+**Collector 是证据入口，不是搜索脚本：它先把用户问题拆成 product / competitor / comparison / question dimensions，再执行搜索与抓取，保存全文 `content_ref`，并在 reviewer 要求补证据时优先执行定向 research plan。**
 
 ---
 
-## 1. v1 → v2 的演进
+## 1. v2 → v3 的演进
 
-| | v1（fake pipeline） | v2（model-backed） |
+| | v2（多查询采集） | v3（research-plan collector） |
 |---|---|---|
-| 搜索查询数 | 1 个 | 3-5 个（产品/定价/竞品/技术/新闻） |
-| 目标来源数 | 2 | 5 |
-| URL 选择 | 直接取前几个 | 优先不同域名，再补同域其他页 |
-| 内容过滤 | 抓到什么存什么 | 模型判断相关性，不相关直接跳过 |
-| 内容提取 | 原始 title/snippet | 模型提取结构化标题+事实摘要 |
-| 不足时 | 直接结束 | 模型生成细化查询，继续搜 |
+| 查询来源 | 模型生成 3-5 个角度 | 请求实体、竞品、问题维度、行业模板、reviewer rework plan |
+| 目标 | 尽量拿够 5 个 source | 尽量覆盖本产品、竞品、对比维度、用户问题 |
+| 网页内容 | 提取标题和摘要 | 摘要 + 完整清洗文本持久化 `content_ref` |
+| URL 选择 | 域名去重 | 域名去重 + source quality scoring |
+| 行业策略 | 通用查询 | 识别阅读/小说等场景后扩展 MAU、用户画像、市场份额、QuestMobile/易观等查询 |
+| 返工 | 通用细化查询 | Reviewer 缺口 → `collector_rework_plan` → 定向补采 |
 
 ---
 
-## 2. Round Flow v2
+## 2. Round Flow v3
 
-```
-Round 1: 模型生成 3-5 个多角度查询 → 批量 web_search x5
-Round 2: 收到搜索结果 → 域名去重选 5-8 个 URL → 批量 web_fetch x5
-Round 3: 收到抓取结果 → 模型相关性过滤 → 模型提取 title+摘要 → 保存
-Round 4+: 不够 5 个 → 模型生成细化查询 → 重复搜索/抓取
+```text
+Round 1:
+  如果存在 collector_rework_plan:
+    生成定向 query，并在 journal 里标记 targeted_rework_plan
+  否则:
+    根据 company / competitors / questions 生成 coverage query plan
+
+Round 2:
+  批量 web_search，保留 attempted:<entity>:<dimension> health signals
+
+Round 3:
+  对搜索结果做 URL scoring、域名去重、分批 web_fetch
+
+Round 4:
+  对 fetch 结果做相关性判断、结构化摘要、质量标注
+  保存 SourceArtifact，metadata 包含 content_ref / content_hash / char_count
+
+Round 5+:
+  如果 coverage 仍不足，生成 refined queries；如果达到可用阈值则 stop
 ```
 
-核心设计：**Collector 不依赖 ToolRuntime，只通过 ToolCall/ToolResult 通信**。
+核心设计仍然不变：**Collector 不直接调用网络库，它只发 `ToolCall`；ToolRuntime 和 Harness 负责执行、记录、报错、写 journal。**
 
 ---
 
-## 3. 为什么多查询很重要
+## 3. 为什么要有 research plan
 
-单查询"小米 荣耀 2026Q1 手机"容易出现：
+竞品分析不是“搜公司名”。优秀 Collector 至少要尝试这些方向：
 
-- 前 5 条全是同一事件的转载（搜狐、企鹅号、头条号）
-- 没有竞品视角（荣耀的市场份额数据）
-- 没有产品细节（具体型号、定价）
+- 本产品：官方信息、功能、价格、定位、使用场景、限制；
+- 竞品：同样的功能/价格/定位/场景/限制；
+- 对比：商业模式、市场份额、用户画像、行业报告、增长数据；
+- 用户问题：把用户写的“受众群体、市场份额、产品能力”等问题拆成查询维度。
 
-多查询策略：每个角度一条 query，模型生成如：
+所以代码会把 question 归一化成维度，例如：
 
+```text
+受众群体 -> audience
+市场份额 -> market_share
+价格/收费 -> pricing
+功能/能力 -> features
+性能/吞吐/延迟 -> performance
 ```
-"小米 2026Q1 智能手机出货量"
-"荣耀 Honor 2026Q1 市场份额"
-"小米 vs 荣耀 2026 产品对比"
-"小米 2026Q1 财报 手机业务"
-```
 
-这样 Analyst 拿到的是多角度、不同信源的素材，分析质量才有保证。
+当场景像在线阅读/小说平台时，还会补充更贴近行业的 query，例如：
+
+```text
+"番茄小说 MAU 月活 用户画像"
+"起点阅读 市场份额 QuestMobile"
+"免费阅读 付费阅读 商业模式 对比"
+"阅文集团 起点阅读 用户规模 年报"
+```
 
 ---
 
-## 4. 相关性过滤
+## 4. URL 质量评分
 
-搜"阿里 Qoder"，抓取回来的可能是：
+搜索引擎经常返回下载站、应用商店、论坛水帖。Collector 现在会给候选 URL 打分：
 
-- ✅ Qoder 产品页面（相关）
-- ✅ Qoder 技术架构分析（相关）
-- ❌ 阿里巴巴 IR 投资者关系页面（无关）
-- ❌ 阿里云通用产品目录（弱相关）
+- 更高分：官方站、投资者关系、年报、行业报告、数据平台、可信媒体；
+- 中等分：产品文档、帮助中心、公司博客；
+- 更低分：应用商店、下载站、内容农场、泛论坛。
 
-模型做快速二分类：`{"relevant": true/false}`。无关页面直接跳过，不浪费 Analyst 的 token 和用户的时间。
+评分不会阻止抓取所有信息，但会影响优先级，让有限 fetch 预算先用在更可能产出证据的页面上。
 
 ---
 
-## 5. 内容提取
+## 5. SourceArtifact 不再只是摘要
 
-原始 HTML 可能有 2000+ 字，包含导航栏、广告、相关文章链接。模型从中提取：
+fetch 后的完整清洗文本会被持久化到 workspace content store。Source 里保存：
 
 ```json
 {
-  "title": "Qoder: Alibaba's AI Coding Assistant Challenges Cursor",
-  "summary": "Alibaba launched Qoder, an AI IDE with three modes (Ask, Agent, Quest). Built on Qwen Coder model with MoE architecture. Currently free, aims to compete with Cursor and Windsurf."
+  "title": "番茄小说用户规模报告",
+  "snippet": "用于表格和快速预览的摘要",
+  "metadata": {
+    "content_ref": "file:.competitive-intel/content/...",
+    "content_hash": "...",
+    "char_count": 18234,
+    "covered_dimensions": ["audience", "market_share"],
+    "extract_quality": "good",
+    "source_score": 8.5
+  }
 }
 ```
 
-而不是把整个 HTML dump 进 SourceArtifact。
+摘要是导航，`content_ref` 才是证据入口。Analyst、Writer、Reviewer 的 prompt context 会根据 `content_ref` 读取 `content_excerpt`，避免只围绕短摘要打转。
 
 ---
 
-## 6. 诊断输出
+## 6. Reviewer 驱动的定向补采
 
-stderr 实时反馈采集进度：
-
-```
-[collector] saved 4 sources, total=4 (target=5)
-[collector] skipping irrelevant: https://ir.alibaba.com/financial-reports
-```
-
-面试时可以讲：**"我们不是在黑箱里跑 agent，collector 的每一步决策都有 stderr 输出可审计。"**
-
----
-
-## 7. 测试覆盖
+如果 Reviewer 认为报告缺少竞品信息，会输出结构化反馈：
 
 ```text
-test_collector_first_round_requests_search_query_from_run_input  → ≥1 个查询
-test_collector_turns_search_results_into_deduped_fetch_calls
-test_collector_saves_fetch_results_as_source_artifacts
-test_collector_skips_urls_already_saved
-test_collector_can_run_through_harness_with_fake_tools             → 不依赖真实网络
+issue: missing_source
+target_agent: collector
+entity: 起点阅读
+dimension: market_share
+question: 比较番茄小说和起点阅读的用户规模与市场份额
 ```
 
-fake 模式保持 2 source 目标，model-backed 模式 5 个目标。Orchestrator 根据 `model_runtime` 是否存在自动选择。
+ReworkLoop 会把它转换成：
+
+```python
+context.metadata["collector_rework_plan"] = [...]
+```
+
+Collector 下一轮会优先执行这个 plan，而不是重新跑一遍通用查询。这样闭环才是：
+
+```text
+Reviewer gap -> Collector targeted research -> Analyst claims -> Writer report -> Reviewer
+```
+
+---
+
+## 7. 诊断输出
+
+journal 和 stderr 会暴露关键动作：
+
+```text
+attempted:番茄小说:official
+attempted:起点阅读:market_share
+targeted_rework_plan
+coverage_incomplete
+sources_ready
+```
+
+这些信号让 dashboard 能解释“Collector 尝试了什么”，即使外部搜索失败，也能看到它做过哪些覆盖动作。
+
+---
+
+## 8. 测试覆盖
+
+关键测试包括：
+
+```text
+test_collector_first_round_requests_search_query_from_run_input
+test_collector_turns_search_results_into_deduped_fetch_calls
+test_collector_saves_fetch_results_as_source_artifacts
+test_collector_records_attempted_coverage_signals
+test_collector_prioritizes_targeted_rework_plan
+test_collector_source_metadata_contains_content_ref
+```
+
+fake 模式保持确定性，真实 web 模式通过工具抽象接入，避免测试依赖网络环境。
 
 ---
 
 ## 面试怎么讲
 
-> Collector 不是"搜一下关键词 dump 结果"。它是多角度的信息采集器：模型生成 3-5 个不同角度的查询，按域名去重抓取，每条内容先做相关性判断再提取结构化摘要。不够的时候会自动细化查询继续采集。整个过程有 stderr 实时输出可审计。这就是为什么 analyst 拿到的不再是一堆噪音 URL，而是真正相关的信息。
+> Collector 不是简单搜关键词。它先根据用户问题和竞品列表生成 coverage plan，覆盖本产品、竞品和对比维度；搜索结果会做 URL quality scoring，fetch 后完整清洗文本会持久化为 content_ref，摘要只用于预览。Reviewer 如果发现缺少某个竞品或维度，ReworkLoop 会把反馈变成定向 research plan，Collector 下一轮优先补这个缺口。这让信息采集从“随机搜索”变成可审计、可返工的证据工程。

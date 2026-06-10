@@ -190,6 +190,47 @@ def test_cached_web_fetch_reuses_workspace_cache(tmp_path: Path) -> None:
     assert client.urls == ["https://example.com/a"]
 
 
+def test_cached_web_fetch_persists_legacy_cached_content(tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    url = "https://example.com/legacy"
+    import hashlib
+    import json
+
+    cache_path = cache_dir / f"{hashlib.sha256(url.encode()).hexdigest()}.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "url": url,
+                "title": "Legacy",
+                "content": "Legacy full content " * 50,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class UnusedFetcher:
+        name = "web_fetch"
+
+        def run(self, args: dict) -> dict:
+            raise AssertionError("cache should be used")
+
+    fetch = CachedWebFetch(
+        fetcher=PersistedContentTool(
+            UnusedFetcher(),
+            LocalContentStore(tmp_path / "content"),
+        ),
+        cache_dir=cache_dir,
+    )
+
+    result = fetch.run({"url": url})
+
+    assert result["cached"] is True
+    assert result["content_ref"].startswith("file:")
+    assert Path(result["content_ref"].removeprefix("file:")).exists()
+    assert json.loads(cache_path.read_text(encoding="utf-8"))["content_ref"] == result["content_ref"]
+
+
 def test_http_client_reports_fetch_errors() -> None:
     class BrokenOpener:
         def __call__(self, request, timeout):

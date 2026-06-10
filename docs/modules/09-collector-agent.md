@@ -1,52 +1,95 @@
-# 09 Collector Agent（v2：多查询 + 相关性过滤）
+# 09 Collector Agent
 
 ## Goal
 
-收集竞品情报来源，保存为 `SourceArtifact`。v2 支持多角度搜索、域名去重、模型相关性过滤、查询细化。
+Collect competitive intelligence evidence as structured `SourceArtifact`
+objects. The current Collector is a research-plan agent: it attempts coverage
+across the product, competitors, comparison dimensions, and the user's explicit
+questions.
 
 ## Scope
 
 In scope:
-- 模型生成 3-5 个多角度搜索查询（产品、定价、竞品对比、技术、新闻）。
-- 批量搜索 → 域名去重选 URL → 分批抓取。
-- 模型判断抓取内容是否与研究主题相关，无关则跳过。
-- 模型提取结构化 title + 2-3 句事实摘要。
-- 首轮不足时自动生成细化查询。
-- Fake 模式保持 2 source 目标；model-backed 模式目标为 5。
+
+- Build query plans from company, competitors, market, and questions.
+- Normalize common question dimensions such as audience, market share, pricing,
+  features, positioning, use cases, limitations, and performance.
+- Add industry-aware query expansions for reading/novel/product-market cases.
+- Execute search/fetch through `ToolRuntime`.
+- Score candidate URLs before fetch.
+- Persist full cleaned fetch text through `content_ref`.
+- Save compact source summaries plus metadata for downstream agents.
+- Prioritize reviewer-generated `collector_rework_plan` items before generic
+  collection.
 
 Out of scope:
-- Deep crawling、source credibility scoring。
 
-## Round Flow v2
+- Browser-rendered crawling.
+- Paid search APIs.
+- Long-term source credibility database.
+- Letting Analyst/Writer/Reviewer fetch new evidence directly.
 
+## Round Flow
+
+```text
+Round 1:
+  Build coverage query plan, or targeted collector_rework_plan if present.
+
+Round 2:
+  Run batched web_search calls and record attempted:<entity>:<dimension> signals.
+
+Round 3:
+  Score URLs, dedupe domains, and run batched web_fetch calls.
+
+Round 4:
+  Filter relevance, extract summary, attach content metadata, save sources.
+
+Round 5+:
+  Refine missing coverage, or stop with sources_ready / coverage_partial.
 ```
-Round 1: 生成 3-5 个多角度查询 → 批量 web_search
-Round 2: 接收搜索结果 → 域名去重 → 批量 web_fetch (最多 5 个/轮)
-Round 3: 接收抓取结果 → 模型相关性过滤 → 模型提取 title+摘要 → 保存
-Round 4+: 不够 target → 生成细化查询 → 重复搜索/抓取
-```
 
-## 关键细节
+## Source Metadata
 
-- **多查询生成**：模型根据不同角度（产品、定价、竞品、技术、新闻）生成多样化查询。
-- **URL 选择**：优先覆盖不同域名，再补充同域名其他页面。
-- **相关性过滤**：模型快速判断页面是否相关（`{"relevant": true/false}`），不相关直接跳过。
-- **内容提取**：模型从原始 HTML 提取 80 字标题 + 400 字事实摘要。
-- **细化查询**：当前来源不够时，模型根据已找到的内容生成补充角度查询。
-- **诊断输出**：stderr 实时打印保存进度和跳过原因。
+Collector should preserve these metadata fields when available:
+
+- `content_ref`: local full-text reference.
+- `content_hash`: hash of persisted cleaned text.
+- `char_count`: size of persisted text.
+- `summary`: compact model/table preview.
+- `covered_dimensions`: dimensions the source may help answer.
+- `source_score`: URL/source quality hint.
+- `extract_quality`: extraction quality hint.
+
+Downstream agents use summaries for orientation and `content_ref` /
+`content_excerpt` for evidence.
+
+## Reviewer-Guided Rework
+
+For blocking `missing_source` feedback, ReworkLoop writes a
+`collector_rework_plan` into `RunContext.metadata`.
+
+Collector must:
+
+- read the plan before creating generic queries;
+- generate focused searches for the feedback `entity`, `dimension`, and
+  `question`;
+- emit `targeted_rework_plan` in health signals;
+- save any newly found evidence as normal `SourceArtifact` objects.
 
 ## Tests
 
-- 多查询生成（fake 模式 ≥1 个 tool call）。
-- 从 fake 搜索结果去重获取 URL。
-- 通过 RuntimeHarness 运行（fake tools）。
-- 默认 target 为 2（fake）/ 5（model-backed）。
+- Query generation from request and competitors.
+- URL dedupe and source scoring.
+- Source artifact creation with metadata.
+- Full-content metadata propagation.
+- Attempted coverage signals.
+- Targeted collector rework plan priority.
+- Harness compatibility with fake tools.
 
 ## Done Criteria
 
-- [x] Collector 支持多角度搜索查询。
-- [x] 域名去重和 URL 选择策略。
-- [x] 模型相关性过滤（model-backed 模式）。
-- [x] 模型内容提取（model-backed 模式）。
-- [x] 首轮不足时查询细化。
-- [x] 186 测试全绿。
+- Collector attempts product, competitor, comparison, and user-question coverage.
+- Fetch output can point to persisted full source text.
+- Reviewer feedback can trigger targeted evidence collection.
+- Network/tool failures remain observable through journal signals instead of
+  silently approving weak evidence.

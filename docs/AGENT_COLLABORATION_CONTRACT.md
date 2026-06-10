@@ -13,10 +13,10 @@ the earliest agent that can fix the underlying problem.
 |---|---|---|---|
 | User Request | Company, competitors, market, questions | `CompetitiveIntelRequest` | Defines the analysis scope and acceptance criteria. |
 | Orchestrator | Request, agent profiles, stores, journal | `RunContext`, `RunResult`, journal sequence | Runs the DAG, applies bounded rework, and decides terminal status. |
-| Collector | Request, prior tool results, reviewer feedback | `SourceArtifact`, coverage signals | Attempts to collect product, competitor, and question-dimension evidence. |
-| Analyst | Active sources, request, reviewer feedback | `AnalysisClaim` | Converts sources into grounded claims with `source_ids`. |
-| Writer | Active claims, active sources, request, reviewer feedback | `ReportDraft` | Produces report sections from claims without inventing unsupported facts. |
-| Reviewer | Report, claims, sources, request | `ReviewFeedback` or approval | Checks grounding, user-question coverage, competitor coverage, and clarity. |
+| Collector | Request, prior tool results, reviewer feedback, optional `collector_rework_plan` | `SourceArtifact`, coverage signals, source metadata | Attempts to collect product, competitor, and question-dimension evidence. |
+| Analyst | Active sources, request, reviewer feedback, `content_ref` / `content_excerpt` | `AnalysisClaim` | Converts sources into grounded claims with `source_ids`. |
+| Writer | Active claims, active sources, request, reviewer feedback, `content_ref` / `content_excerpt`, report history | `ReportDraft` | Produces report sections from claims without inventing unsupported facts. |
+| Reviewer | Report, claims, sources, request, coverage gaps, source metadata, report history, prior feedback | `ReviewFeedback` or approval | Checks grounding, user-question coverage, competitor coverage, and clarity. |
 
 ## Forward Flow
 
@@ -34,6 +34,25 @@ User Request
 
 The orchestrator may stop earlier if an agent aborts, or it may enter a rework
 loop if reviewer feedback identifies a blocking gap.
+
+## Evidence Access Contract
+
+Collector owns evidence acquisition. Every successful fetch should preserve both
+review-friendly metadata and the full cleaned text:
+
+| Field | Purpose |
+|---|---|
+| `summary` / `snippet` | Compact preview for tables and quick model triage. |
+| `content_ref` | Local reference to the full cleaned source text. |
+| `content_hash` | Stable hash for dedupe and audit. |
+| `char_count` | Size of the persisted source text. |
+| `content_excerpt` | Prompt-context excerpt read from `content_ref` for downstream agents. |
+| `covered_dimensions` | Collector's best estimate of which research dimensions the source may cover. |
+| `source_score` / `extract_quality` | Quality hints used for ranking and diagnostics. |
+
+Analyst and Writer must treat snippets as insufficient when a `content_ref` is
+available. Reviewer should reject reports that only recycle source summaries or
+keywords when the original user question requires deeper evidence.
 
 ## Status Semantics
 
@@ -94,6 +113,43 @@ collector -> analyst -> writer -> reviewer
 
 This prevents the system from polishing a report before missing evidence or
 missing claims have been repaired.
+
+## Targeted Collector Rework
+
+When Reviewer emits blocking `missing_source` feedback for Collector, ReworkLoop
+turns the structured gap into `RunContext.metadata["collector_rework_plan"]`.
+The plan contains focused items such as:
+
+```json
+{
+  "entity": "起点阅读",
+  "dimension": "market_share",
+  "question": "比较番茄小说与起点阅读的用户规模和市场份额",
+  "required_action": "Collect competitor market-share evidence"
+}
+```
+
+Collector must prioritize this plan before generic collection. The follow-up run
+should emit a `targeted_rework_plan` signal so the journal shows that the retry
+was driven by reviewer feedback, not by another broad search pass.
+
+If targeted collector rework still cannot produce sufficient evidence within the
+attempt budget, the terminal status should be `needs_more_evidence`, not a vague
+success or generic failure.
+
+## Report History and Prior Feedback
+
+Reviewer receives:
+
+- the latest report;
+- prior report drafts for comparison;
+- prior reviewer feedback;
+- source metadata and coverage gaps;
+- the original user request and competitor list.
+
+Approval means the latest report resolves all blocking historical feedback that
+still applies. If a prior collector gap is still visible, Reviewer should keep it
+blocking and route it back upstream.
 
 ## Examples
 
@@ -166,6 +222,8 @@ The web dashboard should reflect the same contract:
    a generic failure.
 5. `/workflow` shows the primary path, possible rework paths, terminal outcomes,
    and this contract summary.
+6. Source tables should expose content metadata such as `content_ref`,
+   `char_count`, and `covered_dimensions` when present.
 
 The frontend should not invent a separate state machine. It should derive display
 state from `RunResult.status`, `RoundEvent.decision`, and `ReviewFeedback`.

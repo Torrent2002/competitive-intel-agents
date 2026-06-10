@@ -707,3 +707,102 @@ def test_collector_can_run_through_harness_with_fake_tools() -> None:
         "coverage_partial" in event.signals
         for event in journal.list_run_events("run_001")
     )
+
+
+def test_collector_expands_industry_queries_for_audience_and_market_share() -> None:
+    store = InMemoryArtifactStore()
+    collector = CollectorAgent(store)
+    context = RunContext(
+        run_id="run_reading",
+        request=CompetitiveIntelRequest(
+            company="番茄小说",
+            competitors=["起点阅读"],
+            questions=["受众群体，市场份额"],
+        ),
+        agent_profiles={
+            "collector": AgentProfile(
+                agent="collector",
+                max_rounds=10,
+                allowed_tools=["web_search", "web_fetch"],
+            )
+        },
+    )
+
+    result = collector.run_round(context, AgentState(agent="collector", round=1))
+    queries = [call.args["query"] for call in result.tool_calls]
+    metadata = [call.args["metadata"] for call in result.tool_calls]
+
+    assert any("QuestMobile" in query for query in queries)
+    assert any("易观" in query for query in queries)
+    assert any("月活" in query or "MAU" in query for query in queries)
+    assert any("免费阅读" in query and "付费阅读" in query for query in queries)
+    assert any(item["source_type"] == "data_provider" for item in metadata)
+    assert any(item["dimension"] == "market_share" for item in metadata)
+    assert any(item["dimension"] == "audience" for item in metadata)
+
+
+def test_collector_prioritizes_high_quality_urls_before_low_quality_download_sites() -> None:
+    store = InMemoryArtifactStore()
+    collector = CollectorAgent(store)
+    search_results = [
+        {
+            "title": "App download",
+            "url": "https://sj.qq.com/appdetail/com.example",
+            "snippet": "download app",
+            "metadata": {"dimension": "market_share", "source_type": "web"},
+        },
+        {
+            "title": "QuestMobile reading market report",
+            "url": "https://www.questmobile.com.cn/research/report",
+            "snippet": "market share and MAU report",
+            "metadata": {"dimension": "market_share", "source_type": "data_provider"},
+        },
+        {
+            "title": "Official product page",
+            "url": "https://fanqienovel.com/library",
+            "snippet": "official product",
+            "metadata": {"dimension": "official", "source_type": "official"},
+        },
+    ]
+
+    selected = collector._select_urls(search_results, count=3)
+
+    assert selected[0]["url"] == "https://www.questmobile.com.cn/research/report"
+    assert selected[-1]["url"] == "https://sj.qq.com/appdetail/com.example"
+
+
+def test_collector_saves_extract_quality_and_covered_dimensions_metadata() -> None:
+    store = InMemoryArtifactStore()
+    collector = CollectorAgent(store, target_sources=1)
+    content = (
+        "番茄小说月活用户增长，用户画像覆盖18-35岁年轻读者，"
+        "免费阅读市场份额提升，起点阅读保持付费阅读优势。"
+    )
+
+    result = collector.run_round(
+        make_context(),
+        AgentState(
+            agent="collector",
+            round=2,
+            memory={
+                "tool_results": [
+                    ToolResult(
+                        tool_call_id="fetch_001",
+                        ok=True,
+                        data={
+                            "url": "https://example.com/report",
+                            "title": "Reading market report",
+                            "content": content,
+                            "char_count": len(content),
+                        },
+                    ).to_dict()
+                ]
+            },
+        ),
+    )
+
+    source = store.get_artifact(result.output_artifact_ids[0])
+
+    assert source.metadata["extract_quality"] == "good"
+    assert "audience" in source.metadata["covered_dimensions"]
+    assert "market_share" in source.metadata["covered_dimensions"]

@@ -13,6 +13,7 @@ from competitive_intel_agents.agents import (
     WriterAgent,
 )
 from competitive_intel_agents.artifacts import ArtifactNotFoundError, ArtifactStore
+from competitive_intel_agents.journal import JournalStore
 from competitive_intel_agents.models import (
     AgentName,
     AnalysisClaim,
@@ -21,6 +22,7 @@ from competitive_intel_agents.models import (
     RunContext,
     SourceArtifact,
 )
+from competitive_intel_agents.runtime.model_runtime import ModelRuntime
 
 
 REWORK_ROUTES: dict[AgentName, list[AgentName]] = {
@@ -57,10 +59,14 @@ class ReworkLoop:
         artifacts: ArtifactStore,
         harness: Harness,
         max_attempts: int = 2,
+        journal: JournalStore | None = None,
+        model_runtime: ModelRuntime | None = None,
     ) -> None:
         self._artifacts = artifacts
         self._harness = harness
         self._max_attempts = max_attempts
+        self._journal = journal
+        self._model_runtime = model_runtime
         self._attempts: dict[tuple[str, str, str], int] = {}
 
     def apply(self, context: RunContext, feedback: ReviewFeedback) -> ReworkResult:
@@ -78,7 +84,8 @@ class ReworkLoop:
 
         route = route_feedback(feedback)
         replacements = self._prepare_artifact_changes(context, feedback)
-        final_decision = self._run_route(context, route)
+        route_context = self._context_for_feedback(context, feedback)
+        final_decision = self._run_route(route_context, route)
         return ReworkResult(
             status="applied",
             attempts=attempts,
@@ -96,7 +103,9 @@ class ReworkLoop:
         except ArtifactNotFoundError:
             if feedback.target_agent == "collector":
                 replacement = SourceArtifact(
-                    id=self._replacement_id(feedback.target_artifact_id, 1),
+                    id=self._next_available_replacement_id(
+                        feedback.target_artifact_id,
+                    ),
                     run_id=context.run_id,
                     url=f"https://rework.local/{feedback.target_artifact_id}",
                     title=f"Rework source for {feedback.target_artifact_id}",
@@ -170,16 +179,70 @@ class ReworkLoop:
         if agent_name == "collector":
             existing_sources = self._artifacts.list_sources(context.run_id)
             target_sources = max(2, len(existing_sources) + 2)
-            return CollectorAgent(self._artifacts, target_sources=target_sources)
+            return CollectorAgent(
+                self._artifacts,
+                target_sources=target_sources,
+                model_runtime=self._model_runtime,
+            )
         if agent_name == "analyst":
-            return AnalystAgent(self._artifacts)
+            return AnalystAgent(self._artifacts, model_runtime=self._model_runtime)
         if agent_name == "writer":
-            return WriterAgent(self._artifacts)
-        return ReviewerAgent(self._artifacts)
+            return WriterAgent(self._artifacts, model_runtime=self._model_runtime)
+        return ReviewerAgent(
+            self._artifacts,
+            journal=self._journal,
+            model_runtime=self._model_runtime,
+        )
+
+    def _context_for_feedback(
+        self,
+        context: RunContext,
+        feedback: ReviewFeedback,
+    ) -> RunContext:
+        if feedback.target_agent != "collector" or feedback.issue != "missing_source":
+            return context
+        plan = self._collector_rework_plan(context, feedback)
+        metadata = dict(context.metadata)
+        metadata["collector_rework_plan"] = plan
+        return replace(context, metadata=metadata)
+
+    @staticmethod
+    def _collector_rework_plan(
+        context: RunContext,
+        feedback: ReviewFeedback,
+    ) -> dict:
+        entity = feedback.entity or context.request.company
+        entity_role = "self" if entity == context.request.company else "competitor"
+        dimension = feedback.dimension or _dimension_from_feedback(feedback)
+        source_type = (
+            "data_provider"
+            if dimension in {"market_share", "audience"}
+            else "industry_report"
+        )
+        queries = _targeted_queries(context, entity, dimension, feedback)
+        return {
+            "entity": entity,
+            "entity_role": entity_role,
+            "dimension": dimension,
+            "question": feedback.question,
+            "source_type": source_type,
+            "required_action": feedback.required_action,
+            "queries": queries,
+        }
 
     @staticmethod
     def _replacement_id(artifact_id: str, version: int) -> str:
         return f"{artifact_id}_v{version}"
+
+    def _next_available_replacement_id(self, artifact_id: str) -> str:
+        version = 1
+        while True:
+            replacement_id = self._replacement_id(artifact_id, version)
+            try:
+                self._artifacts.get_artifact(replacement_id)
+            except ArtifactNotFoundError:
+                return replacement_id
+            version += 1
 
 
 def _section_from_feedback(feedback: ReviewFeedback) -> str:
@@ -187,3 +250,48 @@ def _section_from_feedback(feedback: ReviewFeedback) -> str:
         if section.lower() in feedback.message.lower():
             return section
     return "Rework notes"
+
+
+def _dimension_from_feedback(feedback: ReviewFeedback) -> str:
+    text = f"{feedback.message} {feedback.required_action} {feedback.question or ''}".lower()
+    if any(token in text for token in ("market share", "市场份额", "市占", "月活", "mau")):
+        return "market_share"
+    if any(token in text for token in ("audience", "受众", "用户画像", "demographic")):
+        return "audience"
+    if any(token in text for token in ("pricing", "价格", "定价")):
+        return "pricing"
+    return "evidence_gap"
+
+
+def _targeted_queries(
+    context: RunContext,
+    entity: str,
+    dimension: str,
+    feedback: ReviewFeedback,
+) -> list[str]:
+    competitors = " ".join(context.request.competitors)
+    base = entity
+    if dimension == "market_share":
+        return [
+            f"{base} QuestMobile market share MAU",
+            f"{base} 市场份额 月活 MAU",
+            f"{base} {competitors} 免费阅读 付费阅读 市场份额".strip(),
+        ]
+    if dimension == "audience":
+        return [
+            f"{base} QuestMobile 用户画像 受众",
+            f"{base} 易观 用户画像",
+            f"{base} audience demographics users",
+        ]
+    if dimension == "pricing":
+        return [
+            f"{base} pricing official",
+            f"{base} 价格 定价",
+            f"{base} {competitors} pricing comparison".strip(),
+        ]
+    question = feedback.question or feedback.required_action
+    return [
+        f"{base} {question}",
+        f"{base} {question} report",
+        f"{base} {competitors} {question}".strip(),
+    ]

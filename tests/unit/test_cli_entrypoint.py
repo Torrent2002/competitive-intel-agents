@@ -25,9 +25,9 @@ def test_cli_run_prints_human_readable_summary() -> None:
     assert result.returncode == 0
     assert "Loaded request: tests/fixtures/request.json" in result.stdout
     assert "Run id: run_" in result.stdout
-    assert "Run status: needs_more_evidence" in result.stdout
+    assert "Run status: rework_failed" in result.stdout
     assert "Sources: " in result.stdout
-    assert "Claims: 4" in result.stdout
+    assert "Claims: 5" in result.stdout
     assert "Report id: report_" in result.stdout
     assert "Review feedback: " in result.stdout
 
@@ -53,7 +53,7 @@ def test_cli_run_accepts_config_and_fake_model_flags() -> None:
     )
 
     assert result.returncode == 0
-    assert "Run status: needs_more_evidence" in result.stdout
+    assert "Run status: rework_failed" in result.stdout
 
 
 def test_cli_run_accepts_real_web_flag_with_workspace_cache(tmp_path: Path) -> None:
@@ -103,7 +103,7 @@ def test_cli_run_persists_workspace_and_show_dashboard(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0
-    assert "Run status: needs_more_evidence" in result.stdout
+    assert "Run status: rework_failed" in result.stdout
     assert "Run:" in result.stdout
     assert "Status: needs_rework" in result.stdout
     assert "Agent rounds:" in result.stdout
@@ -139,7 +139,7 @@ def test_cli_dashboard_reads_persisted_run_from_workspace(tmp_path: Path) -> Non
     assert f"Run: {run_id}" in dashboard.stdout
     assert "Status: needs_rework" in dashboard.stdout
     assert "Sources: " in dashboard.stdout
-    assert "Claims: 4" in dashboard.stdout
+    assert "Claims: 5" in dashboard.stdout
 
 
 def test_cli_runs_lists_persisted_runs(tmp_path: Path) -> None:
@@ -150,7 +150,7 @@ def test_cli_runs_lists_persisted_runs(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert "Run id" in result.stdout
-    assert "needs_more_evidence" in result.stdout
+    assert "rework_failed" in result.stdout
 
 
 def test_cli_chat_runs_pipeline_and_accepts_inspection_commands(tmp_path: Path) -> None:
@@ -180,8 +180,8 @@ def test_cli_chat_runs_pipeline_and_accepts_inspection_commands(tmp_path: Path) 
 
     assert result.returncode == 0
     assert "Company: Notion" in result.stdout
-    assert "Run status: rework_failed" in result.stdout
-    assert "Status: needs_rework" in result.stdout
+    assert "Run status: approved" in result.stdout
+    assert "Status: completed" in result.stdout
     assert "source_" in result.stdout
     assert "claim_" in result.stdout
     assert "## Overview" in result.stdout

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json as _json
 import sys as _sys
+from urllib.parse import urlparse
 
 from competitive_intel_agents.agents.base import BaseAgent
 from competitive_intel_agents.agents.prompt_context import (
@@ -74,12 +75,15 @@ class CollectorAgent(BaseAgent):
                 for i, q in enumerate(queries)
             ]
             self._queried_urls = {s.url for s in existing}
+            signals = [
+                f"search_x{len(calls)}",
+                *self._attempt_signals_for_queries(queries),
+            ]
+            if context.metadata.get("collector_rework_plan"):
+                signals.insert(0, "targeted_rework_plan")
             return AgentRoundResult(
                 tool_calls=calls,
-                signals=[
-                    f"search_x{len(calls)}",
-                    *self._attempt_signals_for_queries(queries),
-                ],
+                signals=signals,
             )
 
         # --- Phase 2: Got search results → extract URLs to fetch ---
@@ -216,6 +220,13 @@ class CollectorAgent(BaseAgent):
 
     def _generate_queries(self, context: RunContext) -> list[str]:
         """Generate 3-5 diverse search queries covering different angles."""
+        rework_plan = self._targeted_rework_plan(context)
+        if rework_plan:
+            self._query_metadata = {
+                item["query"]: item["metadata"] for item in rework_plan
+            }
+            return [item["query"] for item in rework_plan]
+
         plan = self._coverage_query_plan(context)
         if plan:
             self._query_metadata = {item["query"]: item["metadata"] for item in plan}
@@ -228,6 +239,29 @@ class CollectorAgent(BaseAgent):
 
         # Fallback: simple template
         return self._template_queries(context)
+
+    def _targeted_rework_plan(self, context: RunContext) -> list[dict]:
+        raw = context.metadata.get("collector_rework_plan")
+        if not isinstance(raw, dict):
+            return []
+        queries = raw.get("queries", [])
+        if not isinstance(queries, list):
+            return []
+        entity = str(raw.get("entity") or context.request.company)
+        entity_role = str(raw.get("entity_role") or "self")
+        dimension = str(raw.get("dimension") or "evidence_gap")
+        source_type = str(raw.get("source_type") or "web")
+        return [
+            self._query_item(
+                str(query),
+                entity,
+                entity_role,
+                dimension,
+                source_type,
+            )
+            for query in queries
+            if str(query).strip()
+        ]
 
     def _coverage_query_plan(self, context: RunContext) -> list[dict]:
         request = context.request
@@ -277,6 +311,7 @@ class CollectorAgent(BaseAgent):
                 )
             )
 
+        plan.extend(self._industry_research_query_plan(context))
         return self._dedupe_query_plan(plan)
 
     def _coverage_gap_query_plan(
@@ -324,6 +359,20 @@ class CollectorAgent(BaseAgent):
                 candidate = "features"
             elif "性能" in normalized or "benchmark" in normalized:
                 candidate = "performance"
+            elif (
+                "受众" in normalized
+                or "用户画像" in normalized
+                or "audience" in normalized
+                or "demographic" in normalized
+            ):
+                candidate = "audience"
+            elif (
+                "市场份额" in normalized
+                or "市占" in normalized
+                or "market share" in normalized
+                or "份额" in normalized
+            ):
+                candidate = "market_share"
             else:
                 candidate = normalized
             if candidate not in dimensions:
@@ -351,6 +400,8 @@ class CollectorAgent(BaseAgent):
                 "features": "主要功能",
                 "performance": "性能 基准测试",
                 "pricing_features": "价格 功能",
+                "audience": "用户画像 受众群体",
+                "market_share": "市场份额 月活 排名",
             }
         return {
             "official_product": "official product",
@@ -363,11 +414,91 @@ class CollectorAgent(BaseAgent):
             "features": "features",
             "performance": "performance benchmark",
             "pricing_features": "pricing features",
+            "audience": "audience demographics users",
+            "market_share": "market share MAU ranking",
         }
 
     @staticmethod
     def _dimension_query_term(dimension: str, terms: dict[str, str]) -> str:
         return terms.get(dimension, dimension)
+
+    def _industry_research_query_plan(self, context: RunContext) -> list[dict]:
+        text = " ".join(
+            [
+                context.request.company,
+                *context.request.competitors,
+                *context.request.questions,
+                context.request.market or "",
+            ]
+        )
+        if not self._looks_like_reading_market(text):
+            return []
+
+        entities = [context.request.company, *context.request.competitors]
+        plan: list[dict] = []
+        for entity in entities:
+            role = "self" if entity == context.request.company else "competitor"
+            plan.extend(
+                [
+                    self._query_item(
+                        f"{entity} QuestMobile 月活 用户画像",
+                        entity,
+                        role,
+                        "audience",
+                        "data_provider",
+                    ),
+                    self._query_item(
+                        f"{entity} 易观 用户画像 在线阅读",
+                        entity,
+                        role,
+                        "audience",
+                        "data_provider",
+                    ),
+                    self._query_item(
+                        f"{entity} 市场份额 月活 MAU 在线阅读",
+                        entity,
+                        role,
+                        "market_share",
+                        "data_provider",
+                    ),
+                ]
+            )
+        if context.request.competitors:
+            competitor_terms = " ".join(context.request.competitors)
+            plan.extend(
+                [
+                    self._query_item(
+                        f"{context.request.company} {competitor_terms} 免费阅读 付费阅读 市场份额",
+                        context.request.company,
+                        "self",
+                        "market_share",
+                        "industry_report",
+                    ),
+                    self._query_item(
+                        f"{context.request.company} {competitor_terms} 网文 市场格局 用户画像",
+                        context.request.company,
+                        "self",
+                        "comparison",
+                        "industry_report",
+                    ),
+                ]
+            )
+        return plan
+
+    @staticmethod
+    def _looks_like_reading_market(text: str) -> bool:
+        return any(
+            keyword in text.lower()
+            for keyword in (
+                "小说",
+                "阅读",
+                "网文",
+                "起点",
+                "番茄",
+                "online reading",
+                "web novel",
+            )
+        )
 
     @staticmethod
     def _contains_cjk(text: str) -> bool:
@@ -578,6 +709,11 @@ class CollectorAgent(BaseAgent):
 
     def _select_urls(self, results: list[dict], count: int) -> list[dict]:
         """Select best URLs: dedup, prefer unique domains, drop already-seen."""
+        results = sorted(
+            results,
+            key=self._url_quality_score,
+            reverse=True,
+        )
         selected: list[dict] = []
         seen_domains: set[str] = set()
 
@@ -621,8 +757,56 @@ class CollectorAgent(BaseAgent):
 
     @staticmethod
     def _domain(url: str) -> str:
-        from urllib.parse import urlparse
         return urlparse(url).netloc
+
+    @staticmethod
+    def _url_quality_score(result: dict) -> int:
+        url = str(result.get("url", ""))
+        title = str(result.get("title", ""))
+        snippet = str(result.get("snippet", ""))
+        metadata = dict(result.get("metadata", {}))
+        haystack = f"{url} {title} {snippet}".lower()
+        domain = urlparse(url).netloc.lower()
+        score = 0
+        score += {
+            "data_provider": 45,
+            "industry_report": 40,
+            "comparison": 32,
+            "official": 25,
+            "docs": 20,
+            "pricing": 15,
+            "web": 0,
+        }.get(str(metadata.get("source_type", "web")), 0)
+        if any(
+            trusted in domain
+            for trusted in (
+                "questmobile",
+                "analysys",
+                "iresearch",
+                "qimai",
+                "data.ai",
+                "appfigures",
+                "sensortower",
+                "yuewen",
+            )
+        ):
+            score += 35
+        if any(token in haystack for token in ("报告", "research", "market", "市场", "月活", "mau", "用户画像")):
+            score += 12
+        if any(
+            low in domain
+            for low in (
+                "sj.qq.com",
+                "apps.microsoft.com",
+                "app.mi.com",
+                "wandoujia",
+                "softonic",
+            )
+        ):
+            score -= 30
+        if any(token in haystack for token in ("下载", "download", "appdetail")):
+            score -= 10
+        return score
 
     # ----------------------------------------------------------------
     # Relevance filtering & saving
@@ -701,7 +885,67 @@ class CollectorAgent(BaseAgent):
         ):
             if key in data and data[key] not in (None, ""):
                 metadata[key] = data[key]
+        text = " ".join(
+            str(data.get(key, ""))
+            for key in ("title", "summary", "content", "snippet", "preview")
+        )
+        covered_dimensions = CollectorAgent._covered_dimensions_from_text(
+            text,
+            metadata.get("dimension"),
+        )
+        metadata["covered_dimensions"] = covered_dimensions
+        metadata["extract_quality"] = CollectorAgent._extract_quality(
+            data,
+            text,
+            covered_dimensions,
+        )
+        metadata["source_score"] = CollectorAgent._url_quality_score(
+            {
+                "url": data.get("url", ""),
+                "title": data.get("title", ""),
+                "snippet": text,
+                "metadata": metadata,
+            }
+        )
         return metadata
+
+    @staticmethod
+    def _extract_quality(data: dict, text: str, covered_dimensions: list[str]) -> str:
+        char_count = data.get("char_count")
+        if isinstance(char_count, int):
+            length = char_count
+        else:
+            length = len(text.strip())
+        lowered = text.lower()
+        if not text.strip() or length < 50:
+            return "empty"
+        if "enable javascript" in lowered or "需要启用javascript" in lowered:
+            return "js_required"
+        if length >= 500 or len(covered_dimensions) >= 2:
+            return "good"
+        return "partial"
+
+    @staticmethod
+    def _covered_dimensions_from_text(
+        text: str,
+        declared_dimension: object,
+    ) -> list[str]:
+        lowered = text.lower()
+        dimensions: set[str] = set()
+        if isinstance(declared_dimension, str) and declared_dimension:
+            dimensions.add(declared_dimension)
+        checks = {
+            "audience": ("受众", "用户画像", "年龄", "性别", "demographic", "audience"),
+            "market_share": ("市场份额", "市占", "月活", "mau", "排名", "market share"),
+            "pricing": ("价格", "定价", "pricing", "付费", "免费"),
+            "features": ("功能", "feature", "能力"),
+            "business_model": ("商业模式", "广告", "订阅", "收入", "变现"),
+            "comparison": ("对比", "竞争", "vs", "相比"),
+        }
+        for dimension, keywords in checks.items():
+            if any(keyword in lowered for keyword in keywords):
+                dimensions.add(dimension)
+        return sorted(dimensions)
 
     def _is_relevant(self, context: RunContext, data: dict) -> bool:
         """Quick relevance check: does this page relate to our research?"""

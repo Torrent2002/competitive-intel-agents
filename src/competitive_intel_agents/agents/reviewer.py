@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from competitive_intel_agents.agents.base import BaseAgent
 from competitive_intel_agents.agents.prompt_context import (
-    claims_map_payload,
     coverage_payload,
+    claims_map_payload,
     report_payload,
+    report_history_payload,
     request_payload,
     sources_map_payload,
 )
 from competitive_intel_agents.artifacts import ArtifactStore
+from competitive_intel_agents.journal import JournalStore
 from competitive_intel_agents.models import (
     AgentRoundResult,
     AgentState,
@@ -40,9 +42,11 @@ class ReviewerAgent(BaseAgent):
     def __init__(
         self,
         artifacts: ArtifactStore,
+        journal: JournalStore | None = None,
         model_runtime: ModelRuntime | None = None,
     ) -> None:
         self._artifacts = artifacts
+        self._journal = journal
         self._model_runtime = model_runtime
 
     def run_round(self, context: RunContext, state: AgentState) -> AgentRoundResult:
@@ -105,6 +109,7 @@ class ReviewerAgent(BaseAgent):
         report_json = report_payload(report)
         claims_json = claims_map_payload(claims.values())
         sources_json = sources_map_payload(sources.values(), snippet_chars=300)
+        prior_feedback = self._prior_review_feedback(context)
 
         task = (
             f"Review this competitive intelligence report about {context.request.company}. "
@@ -127,6 +132,12 @@ class ReviewerAgent(BaseAgent):
                 "claims": claims_json,
                 "sources": sources_json,
                 "coverage": coverage_payload(context, sources.values()),
+                "report_history": report_history_payload(
+                    self._artifacts.list_reports(context.run_id, status=None)
+                ),
+                "prior_review_feedback": [
+                    item.to_dict() for item in prior_feedback
+                ],
                 "user_questions": context.request.questions,
                 "competitors": context.request.competitors,
             },
@@ -171,9 +182,22 @@ class ReviewerAgent(BaseAgent):
                     target_artifact_id=target_artifact_id,
                     message=message,
                     required_action=required_action,
+                    severity=str(item.get("severity", "blocking")),
+                    blocking=bool(item.get("blocking", True)),
+                    entity=item.get("entity"),
+                    dimension=item.get("dimension"),
+                    question=item.get("question"),
                 )
             )
         return result
+
+    def _prior_review_feedback(self, context: RunContext) -> list[ReviewFeedback]:
+        if self._journal is None:
+            return []
+        feedback: list[ReviewFeedback] = []
+        for event in self._journal.list_agent_events(context.run_id, "reviewer"):
+            feedback.extend(event.review_feedback)
+        return feedback
 
     def _review_report(
         self,
@@ -183,6 +207,8 @@ class ReviewerAgent(BaseAgent):
         context: RunContext,
     ) -> list[ReviewFeedback]:
         feedback: list[ReviewFeedback] = []
+        coverage = coverage_payload(context, sources.values())
+        feedback.extend(self._unresolved_prior_feedback(context, coverage))
         feedback.extend(self._missing_section_feedback(report))
         feedback.extend(self._unknown_claim_feedback(report, claims))
         feedback.extend(self._missing_source_feedback(report, claims, sources))
@@ -190,6 +216,50 @@ class ReviewerAgent(BaseAgent):
         feedback.extend(self._competitive_coverage_feedback(context, report, claims, sources))
         feedback.extend(self._question_coverage_feedback(context, report, claims, sources))
         return feedback
+
+    def _unresolved_prior_feedback(
+        self,
+        context: RunContext,
+        coverage: dict,
+    ) -> list[ReviewFeedback]:
+        if self._journal is None:
+            return []
+        feedback: list[ReviewFeedback] = []
+        for event in self._journal.list_agent_events(context.run_id, "reviewer"):
+            for item in event.review_feedback:
+                if not item.blocking:
+                    continue
+                if item.issue != "missing_source" or item.target_agent != "collector":
+                    continue
+                question_unresolved = bool(
+                    item.question and item.question in coverage.get("missing_questions", [])
+                )
+                entity_unresolved = bool(
+                    item.entity and item.entity in coverage.get("missing_entities", [])
+                )
+                generic_unresolved = not item.question and not item.entity and bool(
+                    coverage.get("missing_entities") or coverage.get("missing_questions")
+                )
+                if not (question_unresolved or entity_unresolved or generic_unresolved):
+                    continue
+                feedback.append(
+                    ReviewFeedback(
+                        issue=item.issue,
+                        target_agent=item.target_agent,
+                        target_artifact_id=item.target_artifact_id,
+                        message=(
+                            "Prior blocking reviewer feedback is still unresolved: "
+                            f"{item.message}"
+                        ),
+                        required_action=item.required_action,
+                        severity=item.severity,
+                        blocking=item.blocking,
+                        entity=item.entity,
+                        dimension=item.dimension,
+                        question=item.question,
+                    )
+                )
+        return _unique_feedback(feedback)
 
     def _missing_section_feedback(
         self, report: ReportDraft

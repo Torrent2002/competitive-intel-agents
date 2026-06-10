@@ -60,4 +60,4 @@ for cert_path in ("/etc/ssl/cert.pem", "/opt/homebrew/etc/openssl@3/cert.pem"):
 
 ## 面试怎么讲
 
-> 模型运行时是 agent 和 LLM 之间的抽象层。agent 不直接拼 HTTP，不解析供应商响应差异。我们同时支持 OpenAI 和 Anthropic 两种 API 格式，fake 模式对 186 个单元测试完全透明——不配置 API key 就回退到确定性 fake provider。SSL 证书在 macOS Homebrew Python 下自动修复，用户不需要手动配置。
+> 模型运行时是 agent 和 LLM 之间的抽象层。agent 不直接拼 HTTP，不解析供应商响应差异。我们同时支持 OpenAI 和 Anthropic 两种 API 格式，fake 模式对完整测试套件透明——不配置 API key 就回退到确定性 fake provider。SSL 证书在 macOS Homebrew Python 下自动修复，用户不需要手动配置。

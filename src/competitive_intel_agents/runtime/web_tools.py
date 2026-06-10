@@ -238,6 +238,12 @@ class CachedWebFetch:
         cache_path = self._cache_dir / f"{hashlib.sha256(url.encode()).hexdigest()}.json"
         if cache_path.exists():
             payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            if "content_ref" not in payload and hasattr(self._fetcher, "persist_payload"):
+                payload = self._fetcher.persist_payload(payload)
+                cache_path.write_text(
+                    json.dumps(payload, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
             payload["cached"] = True
             return payload
         payload = self._fetcher.run(args)

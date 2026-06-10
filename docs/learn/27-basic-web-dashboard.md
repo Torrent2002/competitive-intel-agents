@@ -2,30 +2,75 @@
 
 ## 一句话概括
 
-模块 27 提供一个基于浏览器的最小化 run 检查面板，零外部依赖，只读 workspace stores，绑定 localhost。
+**模块 27 提供一个基于浏览器的 run 检查面板：详情页先展示四个 agent 的协作状态和 workflow map，再展示 report、sources、claims、journal 等表格。**
 
 ## 为什么需要它
 
-终端 dashboard 适合开发者快速检查，但有两类场景不够用：
+终端 dashboard 适合开发者快速检查，但非开发者更需要“看见四个 agent 在协作”：
 
-- **Demo 展示**：给非开发者看 run 结果，终端文字不如一个可点的网页直观。
-- **多 run 浏览**：当 workspace 累积了多次 run，点击切换比命令交互更高效。
+- Collector 是否在收集；
+- Analyst 是否卡住；
+- Writer 是否已产出报告；
+- Reviewer 是否要求 rework；
+- rework 是回到 collector、analyst，还是 writer。
 
-模块 27 解决的就是这个：不用装任何新依赖，一个 `competitive-intel web` 就能在浏览器里看到 run 列表和每条 run 的完整详情。
+所以 run detail 页的优先级是：
+
+```text
+Run status -> Workflow Map -> Agent Workflow -> Report -> Tables
+```
 
 ## 关键代码
 
 - `src/competitive_intel_agents/web/__init__.py`
-  - `render_run_list()` — 从 workspace 读取所有 run results，生成 run 列表页 HTML。
-  - `render_run_detail()` — 渲染单条 run 的详情页：status、report、sources、claims、reviewer feedback、journal events、provenance summary、agent rounds、health signals。
-  - `WebDashboardHandler` — 基于 `http.server.BaseHTTPRequestHandler`，监听 `/` 和 `/runs/<id>`。
-  - `start_web_server()` — 启动阻塞式 HTTP server。
+  - `render_run_list()`：workspace run 列表。
+  - `render_workflow_map()`：协作路径、返工路径、状态契约。
+  - `render_agent_workflow()`：四个固定 agent 卡片。
+  - `render_run_detail()`：report、sources、claims、feedback、journal、provenance。
+  - `WebDashboardHandler`：监听 `/`、`/runs/<id>`、`/workflow`。
+  - `start_web_server()`：启动阻塞式 HTTP server。
 
-### 为什么用 stdlib 而不用 FastAPI
+## Agent Workflow 状态
 
-项目 `pyproject.toml` 的 `dependencies = []`，零外部依赖是设计决策。Web dashboard 是只读面板，不需要表单、auth、session——用 `http.server` 足够，且保持了整个项目的"clone 就能跑"体验。
+前端不维护单独状态机，而是从数据推断：
 
-### CLI 启动
+- `RunResult.status`
+- `RoundEvent.decision`
+- `RoundEvent.agent`
+- `ReviewFeedback.target_agent`
+
+常见显示状态：
+
+| UI State | Meaning |
+|---|---|
+| `pending` | agent 尚未开始 |
+| `running` | run 仍在执行，当前 agent 没有 stop/rework/abort |
+| `done` | agent 当前阶段完成 |
+| `rework` | reviewer 或 rework loop 指向该 agent |
+| `blocked` | 上游失败导致该 agent 没机会执行 |
+| `aborted` | agent abort 或 run aborted |
+
+运行中 agent 卡片内部显示 thinking animation，边框显示流光效果；run 仍是
+`running` 时页面自动刷新。
+
+## Source Metadata 展示
+
+Source 表格优先保持可读，但应展示关键 evidence metadata：
+
+- `content_ref`
+- `char_count`
+- `covered_dimensions`
+- `source_score`
+- `extract_quality`
+
+这样用户可以判断 report 是基于完整 source，还是只拿到了很薄的摘要。
+
+## 为什么用 stdlib 而不用 FastAPI
+
+项目保持零外部依赖。Dashboard 是只读面板，不需要表单、auth、session。
+用 `http.server` 足够，并保证 CLI 和 Web 读的是同一份 workspace 数据。
+
+## CLI 启动
 
 ```bash
 competitive-intel web --workspace .competitive-intel --port 8080
@@ -35,13 +80,4 @@ competitive-intel web --workspace .competitive-intel --port 8080
 
 ## 面试怎么讲
 
-可以说：
-
-> 我们没有引入任何 web 框架依赖。stdlib `http.server` 做的只读 dashboard，直接读 SQLite artifact store 和 journal store。所有页面都是服务端渲染的纯 HTML/CSS，不需要 JavaScript。这保证了 dashboar 和 CLI 读的是同一份数据，不会出现"CLI 能看到但 web 看不到"的不一致。
-
-## 后续扩展
-
-- 实时刷新（WebSocket 或轮询）。
-- run 搜索和过滤。
-- 在线上直接触发 re-run。
-- artifact 和 claim 的 diff 视图（v1 vs v2）。
+> Web dashboard 不是另一个状态系统，它只是把 journal、artifacts、RunResult 和 ReviewFeedback 读出来。详情页先显示四个 agent 的协作状态，让用户看到 collector/analyst/writer/reviewer 的推进和返工，再看 report 和表格。running 时自动刷新，active agent 有 thinking 动画；source 表格还能展示 content_ref 等证据 metadata。

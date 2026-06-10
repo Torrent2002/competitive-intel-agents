@@ -76,4 +76,4 @@ def test_cli_module_runs_with_fixture() -> None:
 
     assert result.returncode == 0
     assert "Loaded request:" in result.stdout
-    assert "Run status: needs_more_evidence" in result.stdout
+    assert "Run status: rework_failed" in result.stdout

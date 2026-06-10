@@ -40,6 +40,14 @@ Reviewer writes `ReviewFeedback`.
 Final prose must be downstream of structured evidence. It must not be the only
 place where facts live.
 
+Collected evidence has two layers:
+
+- a compact `SourceArtifact` summary for fast inspection and tables;
+- a persisted full-text `content_ref` for downstream agents that need the
+  complete cleaned page text.
+
+Snippets and summaries are navigation aids, not the source of truth.
+
 ### 2. Claims Must Carry Sources
 
 Every factual `AnalysisClaim` must include at least one `source_id`.
@@ -54,6 +62,10 @@ Analyst, Writer, and Reviewer do not use web tools in v0.
 This is not because they are technically unable to use tools. It is because the
 workflow needs a clear evidence path: source collection first, analysis second,
 writing third, review last.
+
+Analyst, Writer, and Reviewer may receive `content_ref`, `content_excerpt`, and
+source metadata produced by Collector. They can reason over collected evidence,
+but they should not create new evidence outside the collection boundary.
 
 ### 4. Artifacts Are Immutable By Id
 
@@ -73,6 +85,11 @@ Reviewer output must name:
 
 Feedback that cannot be routed is prose, not workflow control.
 
+For missing evidence, reviewer feedback should also carry the relevant `entity`,
+`dimension`, and original `question` when possible. ReworkLoop can turn that
+structured gap into a targeted collector research plan instead of rerunning the
+generic search flow.
+
 ### 6. Journal Is The Audit Trail
 
 Every harness round writes a `RoundEvent`.
@@ -90,6 +107,18 @@ Generated wording can vary. Regression tests should focus on:
 - total rounds;
 - tool calls;
 - terminal decision.
+
+### 8. Rework Is Targeted, Not Generic
+
+The system should first repair the earliest failed stage:
+
+```text
+collector -> analyst -> writer -> reviewer
+```
+
+If Reviewer says the report lacks competitor evidence, the next Collector pass
+should receive that exact gap as a research plan. It should not blindly repeat
+the original broad collection plan unless no structured gap is available.
 
 ## Interview Framing
 

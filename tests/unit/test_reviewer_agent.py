@@ -11,7 +11,9 @@ from competitive_intel_agents.models import (
     CompetitiveIntelRequest,
     ModelResponse,
     ReportDraft,
+    ReviewFeedback,
     RunContext,
+    RoundEvent,
     SourceArtifact,
 )
 from competitive_intel_agents.runtime import ToolRuntime
@@ -103,14 +105,21 @@ def save_claim(
 
 def save_report(
     store: InMemoryArtifactStore,
+    report_id: str = "report_run_001_001",
     sections: dict[str, str] | None = None,
     claim_ids: list[str] | None = None,
     source_ids: list[str] | None = None,
+    version: int = 1,
+    status: str = "active",
+    supersedes_id: str | None = None,
 ) -> None:
     store.save_report(
         ReportDraft(
-            id="report_run_001_001",
+            id=report_id,
             run_id="run_001",
+            status=status,
+            version=version,
+            supersedes_id=supersedes_id,
             sections=sections
             or {
                 "Overview": "Summary.",
@@ -180,6 +189,95 @@ def test_reviewer_model_context_includes_request_coverage_gaps_and_source_refs()
     assert payload["coverage"]["source_count"] == 1
     assert payload["sources"]["source_001"]["content_ref"] == "content/run_001/source_001.txt"
     assert payload["sources"]["source_001"]["metadata"]["char_count"] == 4096
+
+
+def test_reviewer_model_context_includes_report_history_and_prior_feedback() -> None:
+    store = InMemoryArtifactStore()
+    journal = InMemoryJournalStore()
+    save_source(store, "source_001", entity="Acme")
+    save_source(store, "source_002", entity="Beta")
+    save_claim(store, "claim_001", source_ids=["source_001"])
+    save_claim(store, "claim_002", source_ids=["source_002"])
+    save_report(
+        store,
+        report_id="report_run_001_001",
+        claim_ids=["claim_001"],
+        source_ids=["source_001"],
+    )
+    save_report(
+        store,
+        report_id="report_run_001_002",
+        claim_ids=["claim_001", "claim_002"],
+        source_ids=["source_001", "source_002"],
+        version=2,
+        supersedes_id="report_run_001_001",
+    )
+    store.mark_superseded("report_run_001_001", "report_run_001_002")
+    prior_feedback = ReviewFeedback(
+        issue="missing_section",
+        target_agent="writer",
+        target_artifact_id="report_run_001_001",
+        message="Pricing section was missing.",
+        required_action="Add pricing analysis.",
+    )
+    journal.append(
+        RoundEvent(
+            id="run_001:reviewer:1",
+            run_id="run_001",
+            agent="reviewer",
+            round=1,
+            decision="rework",
+            review_feedback=[prior_feedback],
+        )
+    )
+    runtime = CapturingModelRuntime({"feedback": []})
+    reviewer = ReviewerAgent(store, journal=journal, model_runtime=runtime)
+
+    reviewer.run_round(make_context(), AgentState(agent="reviewer"))
+
+    payload = context_payload(runtime.requests[0])
+    assert [item["id"] for item in payload["report_history"]] == [
+        "report_run_001_001",
+        "report_run_001_002",
+    ]
+    assert payload["report_history"][0]["status"] == "superseded"
+    assert payload["prior_review_feedback"][0]["message"] == "Pricing section was missing."
+
+
+def test_reviewer_rejects_when_prior_feedback_still_unresolved() -> None:
+    store = InMemoryArtifactStore()
+    journal = InMemoryJournalStore()
+    save_source(store, "source_001", entity="Acme", metadata={"dimension": "official"})
+    save_claim(store, "claim_001", source_ids=["source_001"])
+    save_report(store, claim_ids=["claim_001"], source_ids=["source_001"])
+    journal.append(
+        RoundEvent(
+            id="run_001:reviewer:1",
+            run_id="run_001",
+            agent="reviewer",
+            round=1,
+            decision="rework",
+            review_feedback=[
+                ReviewFeedback(
+                    issue="missing_source",
+                    target_agent="collector",
+                    target_artifact_id="collector_coverage",
+                    message="Market share evidence is missing.",
+                    required_action="Collect market share evidence.",
+                    question="market share",
+                )
+            ],
+        )
+    )
+
+    result = ReviewerAgent(store, journal=journal).run_round(
+        make_question_context("market share"),
+        AgentState(agent="reviewer"),
+    )
+
+    assert result.completed is False
+    assert result.review_feedback[0].target_agent == "collector"
+    assert "still unresolved" in result.review_feedback[0].message
 
 
 def test_reviewer_rejects_competitive_report_with_too_few_sources() -> None:
