@@ -11,6 +11,17 @@ from competitive_intel_agents.models import (
     ToolResult,
 )
 from competitive_intel_agents.runtime import FakeWebFetch, FakeWebSearch, ToolRuntime
+from competitive_intel_agents.runtime.model_runtime import ModelResponse
+
+
+class StaticModelRuntime:
+    def __init__(self, parsed: dict) -> None:
+        self.parsed = parsed
+        self.requests = []
+
+    def complete(self, request):
+        self.requests.append(request)
+        return ModelResponse(ok=True, content="", parsed=self.parsed)
 
 
 class EmptySearch:
@@ -167,6 +178,51 @@ def test_collector_marks_every_initial_coverage_slot_as_attempted() -> None:
         "Globex:limitations",
         "ACME:comparison:Globex",
     }
+
+
+def test_collector_model_selected_plan_becomes_coverage_baseline() -> None:
+    store = InMemoryArtifactStore()
+    model = StaticModelRuntime(
+        {
+            "selected_indices": [0],
+            "free_queries": ["ACME Globex enterprise pricing comparison"],
+        }
+    )
+    collector = CollectorAgent(store, target_sources=1, model_runtime=model)
+    context = make_context(max_rounds=10)
+    first = collector.run_round(context, AgentState(agent="collector", round=1))
+
+    assert len(first.tool_calls) == 2
+    assert {
+        signal.removeprefix("attempted:")
+        for signal in first.signals
+        if signal.startswith("attempted:")
+    } == {"ACME:official", "ACME:free_search"}
+
+    result = collector.run_round(
+        context,
+        AgentState(
+            agent="collector",
+            round=2,
+            memory={
+                "tool_results": [
+                    ToolResult(
+                        tool_call_id="fetch_selected",
+                        ok=True,
+                        data={
+                            "url": "https://acme.example/product",
+                            "title": "ACME product",
+                            "content": "ACME official product evidence with pricing details.",
+                            "char_count": 2500,
+                        },
+                    ).to_dict()
+                ]
+            },
+        ),
+    )
+
+    assert result.completed is True
+    assert "coverage_incomplete" not in result.signals
 
 
 def test_collector_does_not_stop_on_source_count_before_competitor_attempts() -> None:
@@ -806,3 +862,35 @@ def test_collector_saves_extract_quality_and_covered_dimensions_metadata() -> No
     assert source.metadata["extract_quality"] == "good"
     assert "audience" in source.metadata["covered_dimensions"]
     assert "market_share" in source.metadata["covered_dimensions"]
+
+
+def test_collector_rejects_empty_or_js_required_fetch_results_as_sources() -> None:
+    store = InMemoryArtifactStore()
+    collector = CollectorAgent(store, target_sources=1)
+
+    result = collector.run_round(
+        make_context(),
+        AgentState(
+            agent="collector",
+            round=2,
+            memory={
+                "tool_results": [
+                    ToolResult(
+                        tool_call_id="fetch_empty",
+                        ok=True,
+                        data={
+                            "url": "https://example.com/js",
+                            "title": "JavaScript app shell",
+                            "content": "Please enable JavaScript to continue.",
+                            "char_count": 37,
+                        },
+                    ).to_dict()
+                ]
+            },
+        ),
+    )
+
+    assert result.output_artifact_ids == []
+    assert store.list_sources("run_001") == []
+    assert result.completed is False
+    assert "source_quality_rejected" in result.signals

@@ -122,17 +122,13 @@ def coverage_payload(
         if item["entity"] not in covered_entities
     ]
 
-    covered_dimensions = {
-        dimension
-        for source in source_list
-        if isinstance((dimension := source.metadata.get("dimension")), str)
-        and dimension
-    }
+    covered_dimensions = _covered_dimensions(source_list)
     missing_questions = [
         question
         for question in request.questions
         if not _question_has_dimension_match(question, covered_dimensions)
     ]
+    evidence_needs = _evidence_needs(request, source_list)
 
     return {
         "source_count": len(source_list),
@@ -142,6 +138,13 @@ def coverage_payload(
         "requested_questions": list(request.questions),
         "covered_dimensions": sorted(covered_dimensions),
         "missing_questions": missing_questions,
+        "evidence_needs": evidence_needs,
+        "missing_evidence_needs": [
+            need for need in evidence_needs if need["status"] == "missing"
+        ],
+        "weak_evidence_needs": [
+            need for need in evidence_needs if need["status"] == "weak"
+        ],
     }
 
 
@@ -153,6 +156,171 @@ def _required_entities(request: CompetitiveIntelRequest) -> list[dict[str, str]]
         if competitor
     )
     return entities
+
+
+def _covered_dimensions(sources: list[SourceArtifact]) -> set[str]:
+    dimensions: set[str] = set()
+    for source in sources:
+        metadata = source.metadata
+        dimension = metadata.get("dimension")
+        if isinstance(dimension, str) and dimension:
+            dimensions.add(dimension)
+        covered = metadata.get("covered_dimensions")
+        if isinstance(covered, list):
+            dimensions.update(item for item in covered if isinstance(item, str) and item)
+    return dimensions
+
+
+def _evidence_needs(
+    request: CompetitiveIntelRequest,
+    sources: list[SourceArtifact],
+) -> list[dict]:
+    subjects = _required_entities(request)
+    needs = _need_templates(request)
+    items: list[dict] = []
+    for subject in subjects:
+        for index, need in enumerate(needs, start=1):
+            matching = [
+                source
+                for source in sources
+                if _source_matches_need(source, subject["entity"], need["dimensions"])
+            ]
+            strong = [source for source in matching if _source_quality(source) == "strong"]
+            weak = [source for source in matching if _source_quality(source) == "weak"]
+            if strong:
+                status = "covered"
+                source_ids = [source.id for source in strong]
+            elif weak:
+                status = "weak"
+                source_ids = [source.id for source in weak]
+            else:
+                status = "missing"
+                source_ids = []
+            items.append(
+                {
+                    "id": f"need_{len(items) + 1:03d}",
+                    "subject": subject["entity"],
+                    "subject_role": subject["role"],
+                    "need": need["need"],
+                    "why": need["why"],
+                    "question": need["question"],
+                    "dimensions": need["dimensions"],
+                    "evidence_type": need["evidence_type"],
+                    "status": status,
+                    "source_ids": source_ids,
+                    "weak_source_ids": [source.id for source in weak],
+                    "slot": f"{subject['entity']}::{index}",
+                }
+            )
+    return items
+
+
+def _need_templates(request: CompetitiveIntelRequest) -> list[dict]:
+    questions = request.questions or ["core product, competitive positioning, and evidence"]
+    templates: list[dict] = []
+    for question in questions:
+        normalized = question.lower()
+        dimensions = _question_dimensions(question)
+        if any(token in normalized for token in ("免费", "付费", "商业模式", "广告", "订阅", "business model")):
+            templates.append(
+                {
+                    "need": "免费阅读/付费阅读模式与变现方式",
+                    "why": "用户问题要求比较商业模式和竞争差异",
+                    "question": question,
+                    "dimensions": sorted(set(["business_model", *dimensions])),
+                    "evidence_type": "official_or_industry",
+                }
+            )
+        if any(token in normalized for token in ("用户规模", "月活", "mau", "受众", "用户画像", "audience")):
+            templates.append(
+                {
+                    "need": "用户规模、受众画像或增长影响",
+                    "why": "用户问题要求判断市场影响和目标人群",
+                    "question": question,
+                    "dimensions": sorted(set(["audience", "market_share", *dimensions])),
+                    "evidence_type": "data_provider_or_industry",
+                }
+            )
+        if not templates or not any(item["question"] == question for item in templates):
+            templates.append(
+                {
+                    "need": question,
+                    "why": "用户显式提出的问题需要对应证据",
+                    "question": question,
+                    "dimensions": dimensions or ["evidence_gap"],
+                    "evidence_type": "official_or_industry",
+                }
+            )
+    return _dedupe_needs(templates)
+
+
+def _question_dimensions(question: str) -> list[str]:
+    normalized = question.lower()
+    dimensions: list[str] = []
+    checks = {
+        "business_model": ("免费", "付费", "商业模式", "广告", "订阅", "business model"),
+        "audience": ("受众", "用户画像", "用户规模", "audience", "demographic"),
+        "market_share": ("市场份额", "市占", "月活", "mau", "排名", "market share"),
+        "pricing": ("价格", "定价", "pricing"),
+        "features": ("功能", "feature", "能力"),
+        "comparison": ("对比", "竞争", "差异", "vs", "compare"),
+    }
+    for dimension, keywords in checks.items():
+        if any(keyword in normalized for keyword in keywords):
+            dimensions.append(dimension)
+    return dimensions
+
+
+def _dedupe_needs(needs: list[dict]) -> list[dict]:
+    deduped: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for need in needs:
+        key = (need["need"], need["question"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(need)
+    return deduped
+
+
+def _source_matches_need(
+    source: SourceArtifact,
+    subject: str,
+    dimensions: list[str],
+) -> bool:
+    metadata = source.metadata
+    entity = metadata.get("entity")
+    if isinstance(entity, str) and entity and entity != subject:
+        return False
+    haystack = " ".join(
+        str(part)
+        for part in (
+            source.title,
+            source.snippet,
+            metadata.get("summary", ""),
+            metadata.get("preview", ""),
+        )
+    ).lower()
+    if subject.lower() not in haystack and entity != subject:
+        return False
+    source_dimensions = set()
+    dimension = metadata.get("dimension")
+    if isinstance(dimension, str):
+        source_dimensions.add(dimension)
+    covered = metadata.get("covered_dimensions")
+    if isinstance(covered, list):
+        source_dimensions.update(item for item in covered if isinstance(item, str))
+    return bool(source_dimensions.intersection(dimensions))
+
+
+def _source_quality(source: SourceArtifact) -> str:
+    metadata = source.metadata
+    if metadata.get("extract_quality") in {"empty", "js_required"}:
+        return "weak"
+    score = metadata.get("source_score")
+    if isinstance(score, (int, float)) and score < 0:
+        return "weak"
+    return "strong"
 
 
 def _question_has_dimension_match(

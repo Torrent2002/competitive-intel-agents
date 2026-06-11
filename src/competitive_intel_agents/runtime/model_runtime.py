@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+from urllib import error, request as urlrequest
 from pathlib import Path
 from typing import Any, Protocol
-
-import requests
 
 from competitive_intel_agents.models import ModelRequest, ModelResponse
 
@@ -44,7 +43,7 @@ class FakeModelProvider:
 
 
 class JsonPostTransport:
-    """JSON POST transport backed by requests (bundled certifi certs)."""
+    """JSON POST transport backed by the Python standard library."""
 
     def post_json(
         self,
@@ -53,16 +52,20 @@ class JsonPostTransport:
         payload: dict,
         timeout: float = 30.0,
     ) -> dict:
+        body = json.dumps(payload).encode("utf-8")
+        req = urlrequest.Request(
+            url,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                **headers,
+            },
+            method="POST",
+        )
         try:
-            response = requests.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=timeout,
-            )
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as exc:
+            with urlrequest.urlopen(req, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except (error.URLError, error.HTTPError, OSError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"model provider request failed: {exc}") from exc
 
 

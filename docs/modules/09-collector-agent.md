@@ -4,8 +4,8 @@
 
 Collect competitive intelligence evidence as structured `SourceArtifact`
 objects. The current Collector is a research-plan agent: it attempts coverage
-across the product, competitors, comparison dimensions, and the user's explicit
-questions.
+against dynamic evidence needs derived from the product, competitors, market,
+reviewer feedback, and the user's explicit questions.
 
 ## Scope
 
@@ -84,6 +84,8 @@ Collector must:
 - Full-content metadata propagation.
 - Attempted coverage signals.
 - Targeted collector rework plan priority.
+- Dynamic evidence-needs coverage payload with `covered` / `weak` / `missing`
+  statuses.
 - Harness compatibility with fake tools.
 
 ## Done Criteria

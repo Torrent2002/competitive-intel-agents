@@ -2,7 +2,7 @@
 
 ## 一句话概括
 
-**Collector 是证据入口，不是搜索脚本：它先把用户问题拆成 product / competitor / comparison / question dimensions，再执行搜索与抓取，保存全文 `content_ref`，并在 reviewer 要求补证据时优先执行定向 research plan。**
+**Collector 是证据入口，不是搜索脚本：它先把用户问题拆成动态 evidence needs，再执行搜索与抓取，保存全文 `content_ref`，并在 reviewer 要求补证据时优先执行定向 research plan。**
 
 ---
 
@@ -55,7 +55,7 @@ Round 5+:
 - 对比：商业模式、市场份额、用户画像、行业报告、增长数据；
 - 用户问题：把用户写的“受众群体、市场份额、产品能力”等问题拆成查询维度。
 
-所以代码会把 question 归一化成维度，例如：
+所以代码会把 question 归一化成动态证据需求，而不是固定二维矩阵。需求会保留自然语言问题，也会标注一些可检索维度，例如：
 
 ```text
 受众群体 -> audience
@@ -73,6 +73,13 @@ Round 5+:
 "免费阅读 付费阅读 商业模式 对比"
 "阅文集团 起点阅读 用户规模 年报"
 ```
+
+这些需求在 prompt context 中会以 `evidence_needs` 的形式出现，每个 item
+记录 subject、need、why、status、source_ids。状态不是简单的有/无：
+
+- `covered`：有质量可用的 source 支撑；
+- `weak`：有匹配 source，但内容是 JS 壳页、低分或证据薄；
+- `missing`：还没有匹配 source。
 
 ---
 

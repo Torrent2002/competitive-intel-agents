@@ -54,6 +54,11 @@ Analyst and Writer must treat snippets as insufficient when a `content_ref` is
 available. Reviewer should reject reports that only recycle source summaries or
 keywords when the original user question requires deeper evidence.
 
+Coverage is modeled as dynamic evidence needs, not as a fixed entity-by-dimension
+matrix. The runtime derives needs from the user's request, competitors, market,
+and reviewer feedback. Each need can be `covered`, `weak`, or `missing`, with
+source ids attached when evidence exists.
+
 ## Status Semantics
 
 | Status | Meaning | User-facing interpretation |

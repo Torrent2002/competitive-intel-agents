@@ -46,6 +46,8 @@ class CollectorAgent(BaseAgent):
         self._pending_urls: list[dict] = []  # {url, title, snippet}
         self._fetch_attempts: dict[str, int] = {}  # url -> attempt count
         self._attempted_coverage_slots: set[str] = set()
+        self._coverage_baseline_slots: set[str] = set()
+        self._last_quality_rejections = 0
 
     def run_round(self, context: RunContext, state: AgentState) -> AgentRoundResult:
         existing = self._artifacts.list_sources(context.run_id)
@@ -65,6 +67,7 @@ class CollectorAgent(BaseAgent):
         if not tool_results and not self._search_queries:
             queries = self._generate_queries(context)
             self._search_queries = queries
+            self._set_coverage_baseline(queries)
             calls = [
                 ToolCall(
                     id=f"collector_search_{state.round}_{i+1}",
@@ -179,6 +182,7 @@ class CollectorAgent(BaseAgent):
                     refined = [item["query"] for item in gap_plan]
                 if refined:
                     self._search_queries = refined
+                    self._set_coverage_baseline(refined, extend=True)
                     calls = [
                         ToolCall(
                             id=f"collector_search_{state.round}_{m+1}",
@@ -234,7 +238,7 @@ class CollectorAgent(BaseAgent):
         # instead of blindly firing all 15 template queries.
         if self._model_runtime is not None:
             queries = self._model_driven_query_selection(context)
-            if queries and len(queries) >= 3:
+            if queries:
                 return queries
 
         # Fallback: template coverage plan
@@ -1008,6 +1012,7 @@ class CollectorAgent(BaseAgent):
     def _filter_and_save(self, context: RunContext, tool_results: list[ToolResult]) -> list[str]:
         """Filter fetched results by relevance, then save the good ones."""
         saved: list[str] = []
+        self._last_quality_rejections = 0
         existing_sources = self._artifacts.list_sources(context.run_id)
         existing_urls = {s.url for s in existing_sources}
         remaining_slots = self._remaining_source_slots(context, existing_sources)
@@ -1047,6 +1052,13 @@ class CollectorAgent(BaseAgent):
             if self._model_runtime is not None and snippet:
                 title, snippet = self._model_extract(context, tr.data)
             metadata = self._source_metadata(metadata, tr.data)
+            if self._reject_source_for_quality(metadata):
+                self._last_quality_rejections += 1
+                print(
+                    f"[collector] skipping low-quality source: {url[:80]}",
+                    file=_sys.stderr,
+                )
+                continue
 
             source = SourceArtifact(
                 id=aid,
@@ -1110,13 +1122,20 @@ class CollectorAgent(BaseAgent):
         else:
             length = len(text.strip())
         lowered = text.lower()
-        if not text.strip() or length < 50:
-            return "empty"
         if "enable javascript" in lowered or "需要启用javascript" in lowered:
             return "js_required"
+        if not text.strip() or length < 50:
+            return "empty"
         if length >= 500 or len(covered_dimensions) >= 2:
             return "good"
         return "partial"
+
+    @staticmethod
+    def _reject_source_for_quality(metadata: dict) -> bool:
+        quality = metadata.get("extract_quality")
+        if quality == "js_required":
+            return True
+        return False
 
     @staticmethod
     def _covered_dimensions_from_text(
@@ -1262,14 +1281,16 @@ class CollectorAgent(BaseAgent):
         return all(entity in covered for entity, _ in self._required_entities(context))
 
     def _coverage_attempts_complete(self, context: RunContext) -> bool:
-        required = {
-            key
-            for key in (
-                self._coverage_attempt_key(item["metadata"])
-                for item in self._coverage_query_plan(context)
-            )
-            if key
-        }
+        required = set(self._coverage_baseline_slots)
+        if not required:
+            required = {
+                key
+                for key in (
+                    self._coverage_attempt_key(item["metadata"])
+                    for item in self._coverage_query_plan(context)
+                )
+                if key
+            }
         return required <= self._attempted_coverage_slots
 
     def _effective_target_sources(self, context: RunContext) -> int:
@@ -1335,6 +1356,8 @@ class CollectorAgent(BaseAgent):
             signals.append("coverage_incomplete")
         elif self._coverage_partial(context, sources):
             signals.append("coverage_partial")
+        if self._last_quality_rejections:
+            signals.append("source_quality_rejected")
         return signals
 
     def _coverage_partial(
@@ -1375,6 +1398,22 @@ class CollectorAgent(BaseAgent):
         self._pending_urls = []
         self._fetch_attempts = {}
         self._attempted_coverage_slots = set()
+        self._coverage_baseline_slots = set()
+        self._last_quality_rejections = 0
+
+    def _set_coverage_baseline(self, queries: list[str], extend: bool = False) -> None:
+        slots = {
+            key
+            for key in (
+                self._coverage_attempt_key(self._metadata_for_query(query))
+                for query in queries
+            )
+            if key
+        }
+        if extend:
+            self._coverage_baseline_slots.update(slots)
+        else:
+            self._coverage_baseline_slots = slots
 
     def _mark_fetch_scheduled(self, urls: list[dict]) -> None:
         for item in urls:
