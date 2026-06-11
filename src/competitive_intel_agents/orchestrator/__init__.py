@@ -218,7 +218,11 @@ class Orchestrator:
             context.run_id,
             "collector",
         )[-1:]
-        if not latest_collector or "coverage_partial" not in latest_collector[0].signals:
+        collector_signals = latest_collector[0].signals if latest_collector else []
+        if not latest_collector or not (
+            "coverage_partial" in collector_signals
+            or "search_exhausted" in collector_signals
+        ):
             return None
 
         missing = self._missing_source_entities(context)

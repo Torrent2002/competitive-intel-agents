@@ -6,7 +6,9 @@ import hashlib
 import html
 import json
 import os
+import random
 import re
+import time
 import base64
 from pathlib import Path
 from typing import Callable, Protocol
@@ -27,6 +29,17 @@ def _ensure_ssl_certs() -> None:
             return
 
 
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
+
+
 class SearchAdapter(Protocol):
     def search(self, query: str, limit: int = 5) -> list[dict]:
         ...
@@ -38,14 +51,14 @@ class HttpClient:
     def __init__(self, opener: Callable | None = None) -> None:
         self._opener = opener or urllib_request.urlopen
 
-    def get_text(self, url: str, timeout: float = 10.0) -> str:
+    def get_text(self, url: str, timeout: float = 10.0, headers: dict | None = None) -> str:
         _ensure_ssl_certs()
-        req = urllib_request.Request(
-            url,
-            headers={
-                "User-Agent": "competitive-intel-agents/0.1 (+local research tool)"
-            },
-        )
+        merged = {
+            "User-Agent": "competitive-intel-agents/0.1 (+local research tool)",
+        }
+        if headers:
+            merged.update(headers)
+        req = urllib_request.Request(url, headers=merged)
         try:
             with self._opener(req, timeout=timeout) as response:
                 raw = response.read()
@@ -147,14 +160,98 @@ class BingSearch:
         return results
 
 
+class BaiduSearch:
+    """Baidu HTML-search adapter — blocked by anti-bot CAPTCHA in most regions.
+
+    Kept for reference; SogouSearch is the preferred Chinese search adapter.
+    """
+
+    def __init__(
+        self,
+        http_client: HttpClient | None = None,
+        timeout: float = 10.0,
+    ) -> None:
+        self._http_client = http_client or HttpClient()
+        self._timeout = timeout
+
+    def search(self, query: str, limit: int = 5) -> list[dict]:
+        encoded = parse.quote_plus(query)
+        try:
+            html_text = self._http_client.get_text(
+                f"https://www.baidu.com/s?wd={encoded}&rn={limit}",
+                timeout=self._timeout,
+                headers=_BROWSER_HEADERS,
+            )
+        except Exception as exc:
+            import sys
+
+            print(
+                f"[baidu] query={query[:50]!r} results=0 error={exc}",
+                file=sys.stderr,
+            )
+            return []
+        results = _parse_baidu_html(html_text, limit)
+        if not results:
+            import sys
+
+            print(
+                f"[baidu] query={query[:50]!r} results=0 parsed_empty(len={len(html_text)})",
+                file=sys.stderr,
+            )
+        return results
+
+
+class SogouSearch:
+    """Sogou HTML-search adapter for Chinese-language queries."""
+
+    def __init__(
+        self,
+        http_client: HttpClient | None = None,
+        timeout: float = 10.0,
+    ) -> None:
+        self._http_client = http_client or HttpClient()
+        self._timeout = timeout
+
+    def search(self, query: str, limit: int = 5) -> list[dict]:
+        encoded = parse.quote_plus(query)
+        try:
+            html_text = self._http_client.get_text(
+                f"https://www.sogou.com/web?query={encoded}",
+                timeout=self._timeout,
+                headers=_BROWSER_HEADERS,
+            )
+        except Exception as exc:
+            import sys
+
+            print(
+                f"[sogou] query={query[:50]!r} results=0 error={exc}",
+                file=sys.stderr,
+            )
+            return []
+        results = _parse_sogou_html(html_text, limit)
+        if not results:
+            import sys
+
+            print(
+                f"[sogou] query={query[:50]!r} results=0 parsed_empty(len={len(html_text)})",
+                file=sys.stderr,
+            )
+        return results
+
+
 class FallbackSearch:
-    """Try search adapters in order until one returns results."""
+    """Try search adapters in order until one returns results.
+
+    A small random delay (0.3-0.8 s) is inserted before each adapter to
+    avoid triggering anti-bot rate limits when many queries fire in a batch.
+    """
 
     def __init__(self, adapters: list[SearchAdapter]) -> None:
         self._adapters = adapters
 
     def search(self, query: str, limit: int = 5) -> list[dict]:
         for adapter in self._adapters:
+            time.sleep(random.uniform(0.1, 0.3))
             try:
                 results = adapter.search(query, limit=limit)
             except Exception as exc:
@@ -394,6 +491,168 @@ def _normalize_duckduckgo_url(href: str) -> str:
     query = parse.parse_qs(parsed.query)
     if "uddg" in query:
         return query["uddg"][0]
+    return href
+
+
+def _parse_baidu_html(html_text: str, limit: int) -> list[dict]:
+    results: list[dict] = []
+    seen_urls: set[str] = set()
+    blocks = re.findall(
+        r'<div\b[^>]*class="[^"]*result[^"]*c-container[^"]*"[^>]*>(.*?)'
+        r"(?=<div\b[^>]*class=\"[^\"]*result|\Z)",
+        html_text,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if not blocks:
+        blocks = re.findall(
+            r'<div\b[^>]*class="[^"]*c-container[^"]*"[^>]*>(.*?)'
+            r"(?=<div\b[^>]*class=\"[^\"]*c-container|\Z)",
+            html_text,
+            re.DOTALL | re.IGNORECASE,
+        )
+    if not blocks:
+        blocks = [html_text]
+
+    for block in blocks:
+        match = re.search(
+            r'<a\b[^>]*href="(?P<href>[^"]+)"[^>]*>(?P<title>.*?)</a>',
+            block,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if not match:
+            continue
+        href = html.unescape(match.group("href"))
+        title = _strip_tags(match.group("title"))
+        if not title:
+            continue
+
+        real_url = _normalize_baidu_url(href)
+        if not real_url.startswith(("http://", "https://")):
+            continue
+        if real_url in seen_urls:
+            continue
+        seen_urls.add(real_url)
+
+        snippet = ""
+        snippet_match = re.search(
+            r'<(?:span|div)\b[^>]*class="[^"]*c-abstract[^"]*"[^>]*>(?P<snippet>.*?)</(?:span|div)>',
+            block,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if not snippet_match:
+            snippet_match = re.search(
+                r'<(?:span|div)\b[^>]*class="[^"]*content[^"]*"[^>]*>(?P<snippet>.*?)</(?:span|div)>',
+                block,
+                re.DOTALL | re.IGNORECASE,
+            )
+        if snippet_match:
+            snippet = _strip_tags(snippet_match.group("snippet"))
+
+        results.append({"title": title, "url": real_url, "snippet": snippet})
+        if len(results) >= limit:
+            break
+    return results
+
+
+def _normalize_baidu_url(href: str) -> str:
+    if href.startswith(("http://", "https://")) and "baidu.com" not in parse.urlparse(href).netloc:
+        return href
+    if not href.startswith(("http://", "https://")):
+        if href.startswith("//"):
+            href = "https:" + href
+        else:
+            return href
+    parsed = parse.urlparse(href)
+    query = parse.parse_qs(parsed.query)
+    encoded = query.get("url", [""])[0]
+    if not encoded:
+        realurl = query.get("realurl", [""])[0]
+        if realurl:
+            return realurl
+        return href
+    if encoded.startswith(("http://", "https://")):
+        return encoded
+    try:
+        decoded = parse.unquote(encoded)
+        if decoded.startswith(("http://", "https://")):
+            return decoded
+    except Exception:
+        pass
+    return href
+
+
+def _parse_sogou_html(html_text: str, limit: int) -> list[dict]:
+    results: list[dict] = []
+    seen_urls: set[str] = set()
+    blocks = re.findall(
+        r'<div\b[^>]*class="[^"]*vrwrap[^"]*"[^>]*>(.*?)'
+        r"(?=<div\b[^>]*class=\"[^\"]*vrwrap|\Z)",
+        html_text,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if not blocks:
+        blocks = re.findall(
+            r'<div\b[^>]*class="[^"]*rb\b[^"]*"[^>]*>(.*?)'
+            r"(?=<div\b[^>]*class=\"[^\"]*rb\b|\Z)",
+            html_text,
+            re.DOTALL | re.IGNORECASE,
+        )
+
+    for block in blocks:
+        match = re.search(
+            r'<a\b[^>]*href="(?P<href>[^"]+)"[^>]*>(?P<title>.*?)</a>',
+            block,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if not match:
+            continue
+        href = html.unescape(match.group("href"))
+        title = _strip_tags(match.group("title"))
+        if not title:
+            continue
+
+        real_url = _normalize_sogou_url(href)
+        if not real_url.startswith(("http://", "https://")):
+            continue
+        if "sogou.com" in parse.urlparse(real_url).netloc:
+            continue
+        if real_url in seen_urls:
+            continue
+        seen_urls.add(real_url)
+
+        snippet = ""
+        snippet_match = re.search(
+            r'<(?:div|p)\b[^>]*class="[^"]*(?:space-txt|str-text|abstract)[^"]*"[^>]*>(?P<snippet>.*?)</(?:div|p)>',
+            block,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if snippet_match:
+            snippet = _strip_tags(snippet_match.group("snippet"))
+
+        results.append({"title": title, "url": real_url, "snippet": snippet})
+        if len(results) >= limit:
+            break
+    return results
+
+
+def _normalize_sogou_url(href: str) -> str:
+    if href.startswith(("http://", "https://")) and "sogou.com" not in parse.urlparse(href).netloc:
+        return href
+    if href.startswith("//"):
+        return f"https:{href}"
+    if href.startswith("/"):
+        href = f"https://www.sogou.com{href}"
+    parsed = parse.urlparse(href)
+    query = parse.parse_qs(parsed.query)
+    encoded = query.get("url", [""])[0]
+    if not encoded:
+        return href
+    try:
+        decoded = parse.unquote(encoded)
+        if decoded.startswith(("http://", "https://")):
+            return decoded
+    except Exception:
+        pass
     return href
 
 

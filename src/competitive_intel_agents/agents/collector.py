@@ -136,6 +136,15 @@ class CollectorAgent(BaseAgent):
                         *self._attempt_signals_for_urls(batch),
                     ],
                 )
+            # All searches returned empty AND no direct URLs could be
+            # generated. Stop retrying — further rounds would only repeat
+            # the same queries.
+            existing = self._artifacts.list_sources(context.run_id)
+            return AgentRoundResult(
+                completed=True,
+                output_artifact_ids=[s.id for s in existing],
+                signals=["search_exhausted"],
+            )
 
         # --- Phase 3: Got fetch results → filter and save ---
         if tool_results:

@@ -21,15 +21,18 @@ from competitive_intel_agents.runtime.tool_runtime import (
 )
 from competitive_intel_agents.runtime.web_tools import (
     CachedWebFetch,
+    BaiduSearch,
     BingSearch,
     DuckDuckGoSearch,
     FallbackSearch,
     HttpClient,
+    SogouSearch,
     WebFetchTool,
     WebSearchTool,
 )
 
 __all__ = [
+    "BaiduSearch",
     "CachedWebFetch",
     "AnthropicMessagesProvider",
     "BingSearch",
@@ -46,6 +49,7 @@ __all__ = [
     "ModelRuntime",
     "PersistedContentTool",
     "Provider",
+    "SogouSearch",
     "ToolPolicy",
     "ToolRuntime",
     "WebFetchTool",

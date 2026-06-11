@@ -40,7 +40,7 @@ class AnalystAgent(BaseAgent):
         sources = self._artifacts.list_sources(context.run_id)
         if not sources:
             return AgentRoundResult(
-                completed=False,
+                completed=True,
                 signals=["missing_sources"],
             )
 

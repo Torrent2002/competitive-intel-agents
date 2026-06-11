@@ -20,6 +20,7 @@ from competitive_intel_agents.runtime import (
     FallbackSearch,
     LocalContentStore,
     PersistedContentTool,
+    SogouSearch,
     ToolRuntime,
     WebFetchTool,
     WebSearchTool,
@@ -751,7 +752,7 @@ def _make_web_orchestrator(
         )
 
     tools = ToolRuntime()
-    tools.register(WebSearchTool(FallbackSearch([BingSearch(), DuckDuckGoSearch(timeout=2)])))
+    tools.register(WebSearchTool(FallbackSearch([BingSearch(), SogouSearch(), DuckDuckGoSearch(timeout=2)])))
     fetch_tool = PersistedContentTool(
         WebFetchTool(max_chars=None),
         content_store=LocalContentStore(workspace.path / "content"),
