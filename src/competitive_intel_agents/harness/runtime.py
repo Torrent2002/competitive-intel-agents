@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from typing import Protocol
+from urllib.parse import urlparse
 
 from competitive_intel_agents.agents import Agent
 from competitive_intel_agents.journal import JournalStore
@@ -67,6 +68,7 @@ class RuntimeHarness:
         self._max_retries = max_retries
         self._tool_signature_counts: dict[tuple[str, AgentName, str, str], int] = {}
         self._retry_counts: dict[tuple[str, AgentName, str], int] = {}
+        self._failed_domains: set[str] = set()
 
     def run_agent(self, context: RunContext, agent: Agent) -> AgentResult:
         max_rounds = self._max_rounds(context, agent.name)
@@ -179,10 +181,29 @@ class RuntimeHarness:
             signature = self._tool_runtime.signature(call)
             signed_call = replace(call, signature=signature)
             signed_tool_calls.append(signed_call)
+            # Intercept web_fetch to known-bad domains
+            if call.name == "web_fetch":
+                url = call.args.get("url", "")
+                domain = _extract_domain(url)
+                if domain and domain in self._failed_domains:
+                    result = ToolResult(
+                        tool_call_id=call.id,
+                        ok=True,
+                        data={"skipped": True, "reason": f"domain {domain} previously failed"},
+                        preview=f"[skipped] {url} — domain {domain} previously failed",
+                    )
+                    tool_results.append(result)
+                    continue
             result = self._tool_runtime.execute(agent, signed_call, context=context)
             tool_results.append(result)
             if not result.ok:
                 tool_error_signals.append(f"tool_error:{call.id}")
+                # Track failed domain for web_fetch calls
+                if call.name == "web_fetch":
+                    url = call.args.get("url", "")
+                    domain = _extract_domain(url)
+                    if domain:
+                        self._failed_domains.add(domain)
         return signed_tool_calls, tool_results, tool_error_signals
 
     def _decide(
@@ -218,8 +239,8 @@ class RuntimeHarness:
         if has_error or "stalled_round" in signals:
             reason = self._retry_reason(has_error, signals)
             if self._retry_exhausted(run_id, agent, reason):
-                signals.append("max_retries_exceeded")
-                return "abort"
+                signals.append("max_errors_tolerated")
+                return "stop"
             return "retry"
         if is_budget_final_round:
             return "abort"
@@ -296,9 +317,25 @@ class RuntimeHarness:
         self._retry_counts[key] = self._retry_counts.get(key, 0) + 1
         return self._retry_counts[key] > self._max_retries
 
+    def reset_retry_counts(self, agent: AgentName) -> None:
+        """Clear retry counts for *agent*, giving fresh quota for rework cycles."""
+        keys_to_clear = [
+            key for key in self._retry_counts if key[1] == agent
+        ]
+        for key in keys_to_clear:
+            del self._retry_counts[key]
+
     @staticmethod
     def _max_rounds(context: RunContext, agent: AgentName) -> int:
         profile = context.agent_profiles.get(agent)
         if profile is None:
             return 1
         return profile.max_rounds
+
+
+def _extract_domain(url: str) -> str:
+    """Extract hostname from a URL, or empty string on parse failure."""
+    try:
+        return urlparse(url).hostname or ""
+    except Exception:
+        return ""

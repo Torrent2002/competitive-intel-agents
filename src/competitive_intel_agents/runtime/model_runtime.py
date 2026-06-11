@@ -123,7 +123,7 @@ class AnthropicMessagesProvider:
         # user/assistant alternation in the Anthropic Messages API.
         payload: dict[str, Any] = {
             "model": self.model,
-            "max_tokens": 2048,
+            "max_tokens": 65536,
             "messages": messages,
         }
         if system_parts:
