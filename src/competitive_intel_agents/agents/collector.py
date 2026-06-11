@@ -1298,10 +1298,15 @@ class CollectorAgent(BaseAgent):
         context: RunContext,
         sources: list[SourceArtifact],
     ) -> bool:
-        if not self._coverage_attempts_complete(context):
-            return False
         if len(sources) >= self._target_sources:
             return True
+        # Escape hatch: if we have >= 60% of target sources and at least
+        # 2 rounds of searching, stop — diminishing returns and risk of
+        # abort from tool errors outweigh marginal coverage gains.
+        if len(sources) >= max(3, int(self._target_sources * 0.6)) and len(self._attempted_coverage_slots) > 6:
+            return True
+        if not self._coverage_attempts_complete(context):
+            return False
         covered = self._covered_entities(sources)
         if not covered:
             return False
