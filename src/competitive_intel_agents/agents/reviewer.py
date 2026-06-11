@@ -224,6 +224,15 @@ class ReviewerAgent(BaseAgent):
     ) -> list[ReviewFeedback]:
         if self._journal is None:
             return []
+        # If collector already completed its last round (sources_ready or
+        # search_exhausted), don't keep flagging missing_source — the
+        # collector has done all it can.
+        collector_events = self._journal.list_agent_events(context.run_id, "collector")
+        collector_done = any(
+            sig in (ev.signals or [])
+            for ev in collector_events
+            for sig in ("sources_ready", "search_exhausted")
+        )
         feedback: list[ReviewFeedback] = []
         for event in self._journal.list_agent_events(context.run_id, "reviewer"):
             for item in event.review_feedback:
@@ -241,6 +250,10 @@ class ReviewerAgent(BaseAgent):
                     coverage.get("missing_entities") or coverage.get("missing_questions")
                 )
                 if not (question_unresolved or entity_unresolved or generic_unresolved):
+                    continue
+                # If collector has finished its work, the remaining gap is
+                # for analyst/writer, not collector.
+                if collector_done:
                     continue
                 feedback.append(
                     ReviewFeedback(
@@ -460,8 +473,15 @@ class ReviewerAgent(BaseAgent):
         claim_text = " ".join(
             f"{claim.text} {claim.reasoning}" for claim in claims.values()
         )
+        # Exclude rework placeholders — their snippet text is the reviewer's
+        # own required_action, which would falsely signal coverage.
+        real_sources = {
+            sid: s for sid, s in sources.items()
+            if not s.url.startswith("https://rework.local/")
+        }
         source_text = " ".join(
-            f"{source.title} {source.snippet} {source.url}" for source in sources.values()
+            f"{source.title} {source.snippet} {source.url}"
+            for source in real_sources.values()
         )
 
         for question in context.request.questions:

@@ -93,12 +93,12 @@ class CollectorAgent(BaseAgent):
         search_results = self._extract_search_results(tool_results)
         if search_results:
             if self._model_runtime is not None:
-                new_urls = self._model_select_urls(context, search_results, count=8)
+                new_urls = self._model_select_urls(context, search_results, count=12)
             else:
-                new_urls = self._select_urls(search_results, count=8)
+                new_urls = self._select_urls(search_results, count=12)
             self._pending_urls = new_urls
             if new_urls:
-                batch = new_urls[:5]
+                batch = new_urls[:8]
                 self._mark_fetch_scheduled(batch)
                 calls = [
                     ToolCall(
@@ -116,7 +116,7 @@ class CollectorAgent(BaseAgent):
         elif self._only_empty_search_results(tool_results):
             fallback_urls = self._direct_url_fallbacks(context)
             if fallback_urls:
-                batch = fallback_urls[:5]
+                batch = fallback_urls[:8]
                 self._mark_fetch_scheduled(batch)
                 calls = [
                     ToolCall(
@@ -162,7 +162,7 @@ class CollectorAgent(BaseAgent):
             # More URLs pending from earlier search batches?
             pending = [u for u in self._pending_urls if u["url"] not in self._queried_urls]
             if pending and len(now) < self._target_sources:
-                batch = pending[:5]
+                batch = pending[:8]
                 self._pending_urls = pending[5:]
                 self._mark_fetch_scheduled(batch)
                 calls = [
@@ -918,9 +918,20 @@ class CollectorAgent(BaseAgent):
                 "snippet": str(r.get("snippet", ""))[:300],
             })
 
-        if len(candidates) <= count:
-            return candidates[:count]
+        # Pre-filter obviously irrelevant URLs before asking the model.
+        # Dictionary sites, app stores, and single-character lookups pollute
+        # Chinese company searches and inherit misleading is_official metadata
+        # from the parent query.
+        candidates = [
+            c for c in candidates
+            if not _is_obviously_irrelevant(c["url"], c.get("title", ""))
+        ]
 
+        if not candidates:
+            return []
+
+        # Always ask the model to vet URLs — even a single bad result wastes
+        # a fetch slot and pollutes the source list.
         # Ask the model to pick the best URLs
         prompt_lib = AgentPromptLibrary()
         candidates_json = _json.dumps(candidates, ensure_ascii=False)
@@ -935,9 +946,16 @@ class CollectorAgent(BaseAgent):
             f"- Unrelated software forums (Adobe, Microsoft, Apple, etc.)\n"
             f"- Government portals or generic news sites that don't discuss the target products\n"
             f"- App store download pages with no substantive content\n\n"
-            f"Return the INDICES (0-based) of the {count} most relevant results, "
-            f"prioritizing official company sites, industry analysis, and pages that "
-            f"are clearly about the target product/market.\n\n"
+            f"RANK the relevant results by quality (BEST FIRST), not by their original order. "
+            f"Prioritize:\n"
+            f"1. Official company/product pages (pricing, features, about)\n"
+            f"2. Industry analysis and comparison articles\n"
+            f"3. News or blog coverage with substantive detail\n\n"
+            f"DIVERSIFY — avoid selecting 3+ URLs from the same domain. "
+            f"Prefer 1 URL per domain unless a second URL adds significant new information.\n\n"
+            f"Return the INDICES (0-based) of up to {count} most relevant results, "
+            f"ORDERED BY QUALITY (best first). "
+            f"If fewer than {count} results are relevant, return only the relevant ones.\n\n"
             f"Return ONLY valid JSON: {{\"selected_indices\": [0, 3, 7, ...]}}\n\n"
             f"Search results:\n{candidates_json}"
         )
@@ -950,7 +968,7 @@ class CollectorAgent(BaseAgent):
             return self._select_urls(results, count)
 
         indices = resp.parsed.get("selected_indices", [])
-        if not isinstance(indices, list) or len(indices) < 2:
+        if not isinstance(indices, list) or len(indices) < 1:
             return self._select_urls(results, count)
 
         selected: list[dict] = []
@@ -1471,3 +1489,46 @@ class CollectorAgent(BaseAgent):
         if isinstance(competitor, str) and competitor:
             return f"{entity}:{dimension}:{competitor}"
         return f"{entity}:{dimension}"
+
+
+def _is_obviously_irrelevant(url: str, title: str) -> bool:
+    """Fast deterministic pre-filter for URLs that are never useful sources.
+
+    Catches dictionary entries, app stores, download portals, and other
+    noise that search engines return for short Chinese company names whose
+    characters also appear in common words (e.g. 飞→fly, 钉→nail).
+    """
+    from urllib.parse import urlparse as _urlparse
+
+    domain = _urlparse(url).netloc.lower()
+
+    # Dictionary / character-lookup sites
+    if any(kw in domain for kw in (
+        "hanyuguoxue.com", "chagushici.com", "zdic.net",
+        "zidian.", "cidian.", "hanyu.", "guoxue.",
+        "dict.cn", "dict.youdao.com",
+    )):
+        return True
+
+    # App stores and download portals
+    if any(kw in domain for kw in (
+        "apps.apple.com", "play.google.com",
+        "apps.microsoft.com", "app.mi.com",
+        "sj.qq.com", "wandoujia", "softonic",
+        "download.cnet.com", "filehippo",
+    )):
+        return True
+
+    # Single-character or single-pinyin lookups (e.g. /zidian/zi-39134)
+    if "/zidian/" in url and any(
+        pattern in url for pattern in ("zi-", "zi_", "%E9%A3%9E", "%E9%92%89")
+    ):
+        return True
+
+    # Snippet farms / content mills
+    if any(kw in domain for kw in (
+        "baike.com",  # 互动百科 (not baidu baike)
+    )):
+        return True
+
+    return False

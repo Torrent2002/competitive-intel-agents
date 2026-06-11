@@ -5,9 +5,9 @@ from __future__ import annotations
 import hashlib
 import html
 import json
-import os
 import random
 import re
+import ssl
 import time
 import base64
 from pathlib import Path
@@ -15,18 +15,31 @@ from typing import Callable, Protocol
 from urllib import parse, request as urllib_request
 
 
-def _ensure_ssl_certs() -> None:
-    """Auto-detect SSL cert file for Homebrew Python on macOS."""
-    if os.environ.get("SSL_CERT_FILE"):
-        return
+def _get_ssl_context() -> ssl.SSLContext:
+    """Return SSLContext with a known-good CA bundle.
+
+    Self-contained — does not depend on environment variables or
+    the Python distribution's compiled-in OpenSSL paths.
+    """
+    # certifi ships its own Mozilla CA bundle and works everywhere.
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        pass
+
+    # Fall back to well-known system paths.
     for cert_path in (
         "/etc/ssl/cert.pem",
+        "/etc/ssl/certs/ca-certificates.crt",
         "/opt/homebrew/etc/openssl@3/cert.pem",
         "/usr/local/etc/openssl@3/cert.pem",
     ):
         if Path(cert_path).exists():
-            os.environ["SSL_CERT_FILE"] = cert_path
-            return
+            return ssl.create_default_context(cafile=cert_path)
+
+    # Last resort.
+    return ssl.create_default_context()
 
 
 _BROWSER_HEADERS = {
@@ -45,14 +58,18 @@ class SearchAdapter(Protocol):
         ...
 
 
+def _default_opener() -> Callable:
+    https_handler = urllib_request.HTTPSHandler(context=_get_ssl_context())
+    return urllib_request.build_opener(https_handler).open
+
+
 class HttpClient:
     """Small HTTP client wrapper so tests can inject transports."""
 
     def __init__(self, opener: Callable | None = None) -> None:
-        self._opener = opener or urllib_request.urlopen
+        self._opener = opener or _default_opener()
 
     def get_text(self, url: str, timeout: float = 10.0, headers: dict | None = None) -> str:
-        _ensure_ssl_certs()
         merged = {
             "User-Agent": "competitive-intel-agents/0.1 (+local research tool)",
         }
@@ -64,6 +81,36 @@ class HttpClient:
                 raw = response.read()
                 charset = response.headers.get_content_charset() or "utf-8"
                 return raw.decode(charset, errors="replace")
+        except Exception as exc:
+            raise RuntimeError(f"failed to fetch {url}: {exc}") from exc
+
+
+class BrowserHttpClient:
+    """HTTP client backed by curl_cffi — mimics Chrome TLS fingerprint.
+
+    urllib + OpenSSL has a distinct JA4 fingerprint that anti-bot systems
+    detect on the very first request.  curl_cffi wraps curl-impersonate
+    which uses BoringSSL patches to match Chrome's TLS handshake exactly.
+    """
+
+    def __init__(self) -> None:
+        from curl_cffi import requests as curl_requests
+
+        self._requests = curl_requests
+
+    def get_text(self, url: str, timeout: float = 10.0, headers: dict | None = None) -> str:
+        merged = {"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"}
+        if headers:
+            merged.update(headers)
+        try:
+            resp = self._requests.get(
+                url,
+                impersonate="chrome124",
+                headers=merged,
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            return resp.text
         except Exception as exc:
             raise RuntimeError(f"failed to fetch {url}: {exc}") from exc
 
@@ -121,14 +168,14 @@ class DuckDuckGoSearch:
 
 
 class BingSearch:
-    """Bing HTML-search adapter used when DuckDuckGo is unavailable."""
+    """Bing HTML-search adapter with browser TLS fingerprint."""
 
     def __init__(
         self,
-        http_client: HttpClient | None = None,
+        http_client: HttpClient | BrowserHttpClient | None = None,
         timeout: float = 10.0,
     ) -> None:
-        self._http_client = http_client or HttpClient()
+        self._http_client = http_client or BrowserHttpClient()
         self._timeout = timeout
 
     def search(self, query: str, limit: int = 5) -> list[dict]:
@@ -161,17 +208,14 @@ class BingSearch:
 
 
 class BaiduSearch:
-    """Baidu HTML-search adapter — blocked by anti-bot CAPTCHA in most regions.
-
-    Kept for reference; SogouSearch is the preferred Chinese search adapter.
-    """
+    """Baidu HTML-search adapter with browser TLS fingerprint."""
 
     def __init__(
         self,
-        http_client: HttpClient | None = None,
+        http_client: HttpClient | BrowserHttpClient | None = None,
         timeout: float = 10.0,
     ) -> None:
-        self._http_client = http_client or HttpClient()
+        self._http_client = http_client or BrowserHttpClient()
         self._timeout = timeout
 
     def search(self, query: str, limit: int = 5) -> list[dict]:
@@ -180,7 +224,6 @@ class BaiduSearch:
             html_text = self._http_client.get_text(
                 f"https://www.baidu.com/s?wd={encoded}&rn={limit}",
                 timeout=self._timeout,
-                headers=_BROWSER_HEADERS,
             )
         except Exception as exc:
             import sys
@@ -202,14 +245,14 @@ class BaiduSearch:
 
 
 class SogouSearch:
-    """Sogou HTML-search adapter for Chinese-language queries."""
+    """Sogou HTML-search adapter with browser TLS fingerprint."""
 
     def __init__(
         self,
-        http_client: HttpClient | None = None,
+        http_client: HttpClient | BrowserHttpClient | None = None,
         timeout: float = 10.0,
     ) -> None:
-        self._http_client = http_client or HttpClient()
+        self._http_client = http_client or BrowserHttpClient()
         self._timeout = timeout
 
     def search(self, query: str, limit: int = 5) -> list[dict]:
@@ -218,7 +261,6 @@ class SogouSearch:
             html_text = self._http_client.get_text(
                 f"https://www.sogou.com/web?query={encoded}",
                 timeout=self._timeout,
-                headers=_BROWSER_HEADERS,
             )
         except Exception as exc:
             import sys
@@ -240,18 +282,21 @@ class SogouSearch:
 
 
 class FallbackSearch:
-    """Try search adapters in order until one returns results.
+    """Merge results from all search adapters, then deduplicate and rank.
 
-    A small random delay (0.3-0.8 s) is inserted before each adapter to
-    avoid triggering anti-bot rate limits when many queries fire in a batch.
+    Queries every adapter (with a small delay between them) and merges
+    results so the collector gets a diverse candidate pool instead of
+    being locked into a single engine's ranking bias.
     """
 
     def __init__(self, adapters: list[SearchAdapter]) -> None:
         self._adapters = adapters
 
     def search(self, query: str, limit: int = 5) -> list[dict]:
+        all_results: list[dict] = []
+        seen_urls: set[str] = set()
         for adapter in self._adapters:
-            time.sleep(random.uniform(0.1, 0.3))
+            time.sleep(random.uniform(0.3, 0.8))
             try:
                 results = adapter.search(query, limit=limit)
             except Exception as exc:
@@ -263,9 +308,16 @@ class FallbackSearch:
                     file=sys.stderr,
                 )
                 continue
-            if results:
-                return results[:limit]
-        return []
+            for r in results:
+                url = r.get("url", "")
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    all_results.append(r)
+
+        # Interleave results from different engines so the first N results
+        # aren't dominated by a single engine.  Round-robin by original
+        # position within each engine's result list.
+        return _interleave(all_results, limit)
 
 
 class WebSearchTool:
@@ -611,7 +663,18 @@ def _parse_sogou_html(html_text: str, limit: int) -> list[dict]:
         if not title:
             continue
 
-        real_url = _normalize_sogou_url(href)
+        # Sogou now puts the real URL in data-url elsewhere in the block;
+        # the href carries an encrypted redirect we can't decode.
+        data_url_match = re.search(
+            r'data-url="(?P<url>https?://[^"]+)"',
+            block,
+            re.IGNORECASE,
+        )
+        if data_url_match:
+            real_url = data_url_match.group("url")
+        else:
+            real_url = _normalize_sogou_url(href)
+
         if not real_url.startswith(("http://", "https://")):
             continue
         if "sogou.com" in parse.urlparse(real_url).netloc:
@@ -674,3 +737,51 @@ def _strip_tags(value: str) -> str:
 
 def _contains_cjk(text: str) -> bool:
     return any("\u4e00" <= char <= "\u9fff" for char in text)
+
+
+def _interleave(results: list[dict], limit: int) -> list[dict]:
+    """Interleave merged results by round-robin on original position.
+
+    If DDG returns [A0, A1, A2] and Bing returns [B0, B1, B2],
+    the output is [A0, B0, A1, B1, A2, B2] \u2014 so neither engine
+    dominates the top of the list.
+    """
+    if not results:
+        return []
+    # Results arrive grouped by engine (DDG first, then Bing, etc).
+    # Split into per-engine buckets, then interleave.
+    seen_titles: set[str] = set()
+    buckets: list[list[dict]] = []
+    current_domain: str | None = None
+    current_bucket: list[dict] = []
+
+    for r in results:
+        url = r.get("url", "")
+        # Use top-level domain as engine proxy
+        domain = parse.urlparse(url).netloc.split(".")[-2] if url else ""
+        title_key = (r.get("title", "") or "")[:60]
+        # Deduplicate across engines (same title likely same page)
+        if title_key and title_key in seen_titles:
+            continue
+        seen_titles.add(title_key)
+
+        if domain != current_domain:
+            if current_bucket:
+                buckets.append(current_bucket)
+            current_bucket = [r]
+            current_domain = domain
+        else:
+            current_bucket.append(r)
+    if current_bucket:
+        buckets.append(current_bucket)
+
+    # Round-robin across buckets
+    output: list[dict] = []
+    max_len = max(len(b) for b in buckets) if buckets else 0
+    for i in range(max_len):
+        for bucket in buckets:
+            if i < len(bucket):
+                output.append(bucket[i])
+                if len(output) >= limit:
+                    return output
+    return output

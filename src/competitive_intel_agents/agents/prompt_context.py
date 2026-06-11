@@ -323,6 +323,32 @@ def _source_quality(source: SourceArtifact) -> str:
     return "strong"
 
 
+def filter_quality_sources(
+    sources: Iterable[SourceArtifact],
+    min_quality: str = "medium",
+) -> list[SourceArtifact]:
+    """Filter out low-quality sources.
+
+    Quality levels: "strong" (extract_quality=good, non-negative score),
+    "medium" (extract_quality=partial), "weak" (empty/js_required/negative score).
+    min_quality="medium" drops weak sources; min_quality="strong" keeps only strong.
+    """
+    result: list[SourceArtifact] = []
+    for source in sources:
+        metadata = source.metadata
+        eq = metadata.get("extract_quality", "")
+        score = metadata.get("source_score")
+
+        if eq in ("js_required", "empty"):
+            continue
+        if isinstance(score, (int, float)) and score < 0:
+            continue
+        if min_quality == "strong" and eq != "good":
+            continue
+        result.append(source)
+    return result
+
+
 def _question_has_dimension_match(
     question: str,
     covered_dimensions: set[str],

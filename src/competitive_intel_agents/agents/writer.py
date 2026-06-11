@@ -6,6 +6,7 @@ from competitive_intel_agents.agents.base import BaseAgent
 from competitive_intel_agents.agents.prompt_context import (
     claims_list_payload,
     coverage_payload,
+    filter_quality_sources,
     request_payload,
     sources_map_payload,
 )
@@ -91,20 +92,35 @@ class WriterAgent(BaseAgent):
             for claim in claims
             for source_id in claim.source_ids
         }
-        sources = [
+        sources = filter_quality_sources([
             source
             for source in self._artifacts.list_sources(context.run_id)
             if source.id in claim_source_ids
-        ]
+        ])
 
+        questions_str = ", ".join(context.request.questions) if context.request.questions else "competitive positioning and market evidence"
         task = (
-            f"Write a competitive intelligence report about {context.request.company} "
-            f"based on the provided claims. Return a JSON object with a 'sections' object "
-            f"containing these keys: {', '.join(self.REQUIRED_SECTIONS)}. "
-            f"Each section value should be 2-4 paragraphs of substantive analysis. "
-            f"Do NOT fabricate facts not present in the claims. "
-            f"Include claim references like [claim_id] in the text. "
-            f"Also include 'claim_ids' (list) and 'source_ids' (list) in the JSON."
+            f"You are writing a competitive intelligence report about "
+            f"{context.request.company} "
+            f"({'vs ' + ', '.join(context.request.competitors) if context.request.competitors else ''}).\n"
+            f"The user asked: {questions_str}\n\n"
+            f"Write sections: {', '.join(self.REQUIRED_SECTIONS)}.\n\n"
+            f"CRITICAL RULES:\n"
+            f"1. THINK CRITICALLY — do not parrot claims verbatim. Evaluate each claim's "
+            f"confidence and source quality before including it.\n"
+            f"2. If a claim has confidence='low' or comes from marketing material, present it "
+            f"as 'X claims...' or 'according to X...', NOT as established fact.\n"
+            f"3. If sources contradict each other, acknowledge the contradiction and state "
+            f"what you can and cannot verify.\n"
+            f"4. MARK GAPS — if important information for a section is missing from the claims, "
+            f"explicitly state 'No sourced evidence available for [topic]' rather than "
+            f"guessing or padding.\n"
+            f"5. SYNTHESIZE — combine related claims into coherent analysis, don't just list them.\n"
+            f"6. Each section: 2-4 paragraphs of substantive analysis. "
+            f"Include [claim_id] references inline.\n"
+            f"7. The 'Sources' section should list each source with its title, url, and "
+            f"a one-line quality assessment.\n\n"
+            f"Return JSON: {{\"sections\": {{...}}, \"claim_ids\": [...], \"source_ids\": [...]}}"
         )
         model_req = prompt_lib.build(
             self.name,

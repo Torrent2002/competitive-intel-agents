@@ -638,8 +638,8 @@ def _render_run_form() -> str:
         '<div style="margin-top:.75rem"><label>Questions</label>'
         '<textarea name="questions" placeholder="pricing, collaboration, positioning"></textarea></div>\n'
         '<div class="checks">\n'
-        '<label><input type="checkbox" name="real_web" value="1"> Real web collection</label>\n'
-        '<label><input type="checkbox" name="real_model" value="1"> Real model</label>\n'
+        '<label><input type="checkbox" name="real_web" value="1" checked> Real web collection</label>\n'
+        '<label><input type="checkbox" name="real_model" value="1" checked> Real model</label>\n'
         '</div>\n'
         '<button type="submit">Run Analysis</button>\n'
         '</form>\n'
@@ -752,7 +752,7 @@ def _make_web_orchestrator(
         )
 
     tools = ToolRuntime()
-    tools.register(WebSearchTool(FallbackSearch([BingSearch(), SogouSearch(), DuckDuckGoSearch(timeout=2)])))
+    tools.register(WebSearchTool(FallbackSearch([DuckDuckGoSearch(timeout=8), BingSearch()])))
     fetch_tool = PersistedContentTool(
         WebFetchTool(max_chars=None),
         content_store=LocalContentStore(workspace.path / "content"),

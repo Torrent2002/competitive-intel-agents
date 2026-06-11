@@ -7,6 +7,7 @@ import json
 from competitive_intel_agents.agents.base import BaseAgent
 from competitive_intel_agents.agents.prompt_context import (
     coverage_payload,
+    filter_quality_sources,
     request_payload,
     sources_list_payload,
 )
@@ -102,16 +103,32 @@ class AnalystAgent(BaseAgent):
         if not unclaimed_sources:
             return []
 
-        prompt_sources = unclaimed_sources[:5]
+        prompt_sources = filter_quality_sources(unclaimed_sources[:5])
         sources_json = sources_list_payload(prompt_sources, snippet_chars=500)
 
+        questions_str = ", ".join(context.request.questions) if context.request.questions else "core product, competitive positioning, and market evidence"
         task = (
-            f"Analyze the following sources about {context.request.company} "
-            f"and produce 2-3 factual claims. Each claim MUST reference at least one "
-            f"source_id from the provided sources. "
-            f"Return a JSON object with a 'claims' array where each claim has: "
-            f"'text' (one sentence factual claim), 'source_ids' (list of source id strings), "
-            f"'confidence' (high/medium/low), 'reasoning' (one sentence)."
+            f"You are a competitive intelligence analyst. Your job is to extract "
+            f"PRECISE, VERIFIABLE factual claims from the provided sources about "
+            f"{context.request.company} and its competitors "
+            f"({', '.join(context.request.competitors) if context.request.competitors else 'none specified'}).\n\n"
+            f"The user wants to answer these questions: {questions_str}\n\n"
+            f"RULES:\n"
+            f"1. Each claim must be a SINGLE specific, factual statement — not vague summaries.\n"
+            f"2. Prefer claims that directly address the user's questions above.\n"
+            f"3. If a source makes a marketing claim ('leading platform', 'best-in-class'), "
+            f"distill the FACT behind it (e.g. 'X claims Y million users as of Z') or label "
+            f"confidence as 'low'.\n"
+            f"4. Cross-reference: if two sources disagree, note it in reasoning.\n"
+            f"5. confidence='high' ONLY when multiple sources agree or the claim comes from "
+            f"an official primary source (company website, regulatory filing). "
+            f"confidence='low' for unverified claims, marketing language, or single anonymous sources.\n"
+            f"6. Do NOT generate claims about topics with no supporting evidence in the sources.\n\n"
+            f"Return a JSON object with a 'claims' array. Each claim has:\n"
+            f"- 'text': one sentence factual claim\n"
+            f"- 'source_ids': list of source_id strings that support this claim\n"
+            f"- 'confidence': 'high' | 'medium' | 'low'\n"
+            f"- 'reasoning': one sentence explaining why this claim is credible (or not)\n"
         )
         model_req = prompt_lib.build(
             self.name,

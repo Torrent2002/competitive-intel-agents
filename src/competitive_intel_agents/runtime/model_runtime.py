@@ -4,11 +4,30 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 from urllib import error, request as urlrequest
 from pathlib import Path
 from typing import Any, Protocol
 
 from competitive_intel_agents.models import ModelRequest, ModelResponse
+
+
+def _build_ssl_context() -> ssl.SSLContext:
+    """Build SSL context with certifi or system CA bundle."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        pass
+    for cert_path in (
+        "/etc/ssl/cert.pem",
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/opt/homebrew/etc/openssl@3/cert.pem",
+        "/usr/local/etc/openssl@3/cert.pem",
+    ):
+        if Path(cert_path).exists():
+            return ssl.create_default_context(cafile=cert_path)
+    return ssl.create_default_context()
 
 
 class Provider(Protocol):
@@ -45,6 +64,9 @@ class FakeModelProvider:
 class JsonPostTransport:
     """JSON POST transport backed by the Python standard library."""
 
+    def __init__(self) -> None:
+        self._ssl_context = _build_ssl_context()
+
     def post_json(
         self,
         url: str,
@@ -63,7 +85,7 @@ class JsonPostTransport:
             method="POST",
         )
         try:
-            with urlrequest.urlopen(req, timeout=timeout) as response:
+            with urlrequest.urlopen(req, timeout=timeout, context=self._ssl_context) as response:
                 return json.loads(response.read().decode("utf-8"))
         except (error.URLError, error.HTTPError, OSError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"model provider request failed: {exc}") from exc
