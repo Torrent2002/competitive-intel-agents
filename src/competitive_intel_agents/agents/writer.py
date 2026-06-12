@@ -163,14 +163,19 @@ class WriterAgent(BaseAgent):
             f"guessing or padding.\n"
             f"5. SYNTHESIZE — combine related claims into coherent analysis, don't just list them.\n"
             f"6. Write each section with enough depth to be genuinely useful to a decision-maker. "
-            f"Aim for thorough, evidence-rich paragraphs. Include [claim_id] references inline.\n"
-            f"7. The 'Sources' section should list each source with its title, url, and "
-            f"a one-line quality assessment.\n"
+            f"Aim for thorough, evidence-rich paragraphs.\n"
+            f"7. CITATION FORMAT — use numbered references like [1], [2], etc. in the body text. "
+            f"Do NOT use [claim_xxx] or [source_xxx] inline. Each number maps to a source listed "
+            f"in the 'Sources' section. The 'Sources' section should be a numbered reference list:\n"
+            f"   [1] Title (URL) — one-line quality assessment\n"
+            f"   [2] Title (URL) — one-line quality assessment\n"
+            f"   Group multiple citations: [1][2] or [1,3,5].\n"
             f"8. You have access to ALL collected sources, not just those with claims. "
             f"Sources include analyst assessments — use them to judge which sources to trust. "
             f"Draw from all available material to write a comprehensive report.\n\n"
-            f"Return JSON: {{\"sections\": {{...}}, \"claim_ids\": [...], \"source_ids\": [...], "
-            f"\"decisions\": [...]}}\n"
+            f"Return JSON: {{\"sections\": {{\"Overview\": \"plain text\", ...}}, "
+            f"\"claim_ids\": [...], \"source_ids\": [...], \"decisions\": [...]}}\n"
+            f"IMPORTANT: each section value must be a PLAIN STRING, not a nested object.\n"
             f"Each decision: {{\"type\": str (e.g. source_deprioritized|section_gap_acknowledged|"
             f"claim_interpreted), \"target_id\": str, \"reason\": str}} — explain why you "
             f"deprioritized a source, acknowledged a gap, or interpreted a claim in a certain way."
@@ -230,10 +235,16 @@ class WriterAgent(BaseAgent):
         if not isinstance(sections, dict) or not sections:
             return self._template_sections(context, claims)
 
-        # Ensure all required sections exist
+        # Ensure all required sections exist — handle both flat string and
+        # nested {"content": "...", "claim_ids": [...]} formats from the LLM.
         result: dict[str, str] = {}
         for section in self.REQUIRED_SECTIONS:
-            result[section] = str(sections.get(section, ""))
+            value = sections.get(section, "")
+            if isinstance(value, dict):
+                value = value.get("content", str(value))
+            if not isinstance(value, str):
+                value = str(value)
+            result[section] = value
 
         # Record conversation and agent context on success
         if result and self._conversation_store:
