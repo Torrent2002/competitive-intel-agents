@@ -48,6 +48,7 @@ class CollectorAgent(BaseAgent):
         self._attempted_coverage_slots: set[str] = set()
         self._coverage_baseline_slots: set[str] = set()
         self._last_quality_rejections = 0
+        self._failed_urls: set[str] = set()
 
     def run_round(self, context: RunContext, state: AgentState) -> AgentRoundResult:
         existing = self._artifacts.list_sources(context.run_id)
@@ -98,7 +99,7 @@ class CollectorAgent(BaseAgent):
                 new_urls = self._select_urls(search_results, count=12)
             self._pending_urls = new_urls
             if new_urls:
-                batch = new_urls[:8]
+                batch = self._elidible_fetch_batch(new_urls, 8)
                 self._mark_fetch_scheduled(batch)
                 calls = [
                     ToolCall(
@@ -116,7 +117,7 @@ class CollectorAgent(BaseAgent):
         elif self._only_empty_search_results(tool_results):
             fallback_urls = self._direct_url_fallbacks(context)
             if fallback_urls:
-                batch = fallback_urls[:8]
+                batch = self._elidible_fetch_batch(fallback_urls, 8)
                 self._mark_fetch_scheduled(batch)
                 calls = [
                     ToolCall(
@@ -160,7 +161,7 @@ class CollectorAgent(BaseAgent):
                 )
 
             # More URLs pending from earlier search batches?
-            pending = [u for u in self._pending_urls if u["url"] not in self._queried_urls]
+            pending = [u for u in self._pending_urls if u["url"] not in self._queried_urls and u["url"] not in self._failed_urls]
             if pending and len(now) < self._target_sources:
                 batch = pending[:8]
                 self._pending_urls = pending[5:]
@@ -1048,7 +1049,12 @@ class CollectorAgent(BaseAgent):
         for tr in tool_results:
             if len(saved) >= remaining_slots:
                 break
-            if not tr.ok or "url" not in tr.data:
+            if not tr.ok:
+                failed_url = tr.data.get("url", "") if isinstance(tr.data, dict) else ""
+                if failed_url:
+                    self._failed_urls.add(failed_url)
+                continue
+            if "url" not in tr.data:
                 continue
             url = tr.data.get("url", "")
             if not url or url in existing_urls:
@@ -1432,6 +1438,7 @@ class CollectorAgent(BaseAgent):
         self._attempted_coverage_slots = set()
         self._coverage_baseline_slots = set()
         self._last_quality_rejections = 0
+        self._failed_urls = set()
 
     def _set_coverage_baseline(self, queries: list[str], extend: bool = False) -> None:
         slots = {
@@ -1453,6 +1460,16 @@ class CollectorAgent(BaseAgent):
             if url:
                 self._queried_urls.add(url)
                 self._url_metadata[url] = dict(item.get("metadata", {}))
+
+    def _elidible_fetch_batch(self, urls: list[dict], size: int) -> list[dict]:
+        """Return up to *size* URLs not yet queried and not previously failed."""
+        batch: list[dict] = []
+        for u in urls:
+            if len(batch) >= size:
+                break
+            if u["url"] not in self._queried_urls and u["url"] not in self._failed_urls:
+                batch.append(u)
+        return batch
 
     def _metadata_for_query(self, query: str) -> dict:
         return dict(self._query_metadata.get(query, {}))
