@@ -56,16 +56,18 @@ def source_payload(
 def sources_list_payload(
     sources: Iterable[SourceArtifact],
     snippet_chars: int = 1000,
+    content_excerpt_chars: int = 4000,
 ) -> list[dict]:
-    return [source_payload(source, snippet_chars=snippet_chars) for source in sources]
+    return [source_payload(source, snippet_chars=snippet_chars, content_excerpt_chars=content_excerpt_chars) for source in sources]
 
 
 def sources_map_payload(
     sources: Iterable[SourceArtifact],
     snippet_chars: int = 1000,
+    content_excerpt_chars: int = 4000,
 ) -> dict[str, dict]:
     return {
-        source.id: source_payload(source, snippet_chars=snippet_chars)
+        source.id: source_payload(source, snippet_chars=snippet_chars, content_excerpt_chars=content_excerpt_chars)
         for source in sources
     }
 

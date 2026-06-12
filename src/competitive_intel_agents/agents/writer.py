@@ -120,6 +120,12 @@ class WriterAgent(BaseAgent):
             self._artifacts.list_sources(context.run_id)
         )
 
+        # Writer gets larger content excerpts (8000 chars per source vs default 4000)
+        # to produce deeper, more detailed analysis
+        sources_payload = sources_map_payload(
+            sources, snippet_chars=2000, content_excerpt_chars=8000,
+        )
+
         # Build assessed sources context from analyst assessments
         assessed_sources = []
         for source in sources:
@@ -156,8 +162,8 @@ class WriterAgent(BaseAgent):
             f"explicitly state 'No sourced evidence available for [topic]' rather than "
             f"guessing or padding.\n"
             f"5. SYNTHESIZE — combine related claims into coherent analysis, don't just list them.\n"
-            f"6. Each section: 2-4 paragraphs of substantive analysis. "
-            f"Include [claim_id] references inline.\n"
+            f"6. Write each section with enough depth to be genuinely useful to a decision-maker. "
+            f"Aim for thorough, evidence-rich paragraphs. Include [claim_id] references inline.\n"
             f"7. The 'Sources' section should list each source with its title, url, and "
             f"a one-line quality assessment.\n"
             f"8. You have access to ALL collected sources, not just those with claims. "
@@ -187,7 +193,7 @@ class WriterAgent(BaseAgent):
             "market": context.request.market,
             "competitors": context.request.competitors,
             "claims": claims_json,
-            "sources": sources_map_payload(sources),
+            "sources": sources_payload,
             "assessed_sources": assessed_sources,
             "coverage": coverage_payload(context, sources),
             "upstream_contexts": upstream_contexts,
