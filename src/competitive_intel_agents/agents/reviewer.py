@@ -126,60 +126,35 @@ class ReviewerAgent(BaseAgent):
             f"'target_artifact_id', 'message', 'required_action'. "
             f"Only report genuine issues — an empty feedback array is OK if quality is good."
         )
-        model_req = prompt_lib.build(
-            self.name,
-            task,
-            {
-                "request": request_payload(context),
-                "report": report_json,
-                "claims": claims_json,
-                "sources": sources_json,
-                "coverage": coverage_payload(context, sources.values()),
-                "report_history": report_history_payload(
-                    self._artifacts.list_reports(context.run_id, status=None)
-                ),
-                "prior_review_feedback": [
-                    item.to_dict() for item in prior_feedback
-                ],
-                "user_questions": context.request.questions,
-                "competitors": context.request.competitors,
-                "upstream_contexts": self._artifacts.get_agent_contexts(
-                    context.run_id, "reviewer"
-                ),
-            },
-        )
+        prompt_context = {
+            "request": request_payload(context),
+            "report": report_json,
+            "claims": claims_json,
+            "sources": sources_json,
+            "coverage": coverage_payload(context, sources.values()),
+            "report_history": report_history_payload(
+                self._artifacts.list_reports(context.run_id, status=None)
+            ),
+            "prior_review_feedback": [
+                item.to_dict() for item in prior_feedback
+            ],
+            "user_questions": context.request.questions,
+            "competitors": context.request.competitors,
+            "upstream_contexts": self._artifacts.get_agent_contexts(
+                context.run_id, "reviewer"
+            ),
+        }
         history = (
             self._conversation_store.get_history(context.run_id, self.name)
             if self._conversation_store
             else None
         )
         if history:
-            import json as _json
-            user_content = model_req.messages[-1]["content"] if model_req.messages else ""
             model_req = prompt_lib.build_with_history(
-                self.name,
-                task,
-                model_req.messages[-1]["content"].split("\n\nContext JSON:\n")[0] if "\n\nContext JSON:\n" in model_req.messages[-1]["content"] else task,
-                {
-                    "request": request_payload(context),
-                    "report": report_json,
-                    "claims": claims_json,
-                    "sources": sources_json,
-                    "coverage": coverage_payload(context, sources.values()),
-                    "report_history": report_history_payload(
-                        self._artifacts.list_reports(context.run_id, status=None)
-                    ),
-                    "prior_review_feedback": [
-                        item.to_dict() for item in prior_feedback
-                    ],
-                    "user_questions": context.request.questions,
-                    "competitors": context.request.competitors,
-                    "upstream_contexts": self._artifacts.get_agent_contexts(
-                        context.run_id, "reviewer"
-                    ),
-                },
-                history=history,
+                self.name, task, prompt_context, history=history,
             )
+        else:
+            model_req = prompt_lib.build(self.name, task, prompt_context)
         resp = self._model_runtime.complete(model_req)
         if not resp.ok or not resp.parsed:
             return []
