@@ -63,7 +63,7 @@ class WriterAgent(BaseAgent):
         template_fallback = False
         if self._model_runtime is not None:
             sections = self._model_sections(context, claims)
-            if not sections or all(not v for v in sections.values()):
+            if not sections or all(not v or "[FAKE]" in v for v in sections.values()):
                 print(
                     "[writer] WARNING: model failed, falling back to template report",
                     file=_sys.stderr,
