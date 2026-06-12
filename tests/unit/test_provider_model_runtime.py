@@ -91,13 +91,57 @@ def test_anthropic_provider_moves_system_message_to_top_level_payload() -> None:
         )
     )
 
-    assert transport.payload["system"] == "System instructions."
+    # When the system prompt does not already mandate JSON-only output,
+    # the provider defensively appends a JSON instruction to the system
+    # block (rather than as a user message, which would break the
+    # required user/assistant alternation in the Anthropic API).
+    assert transport.payload["system"].startswith("System instructions.")
+    assert "JSON" in transport.payload["system"]
     # response_format="json" no longer injects an extra user message —
-    # the JSON output instruction lives in the system prompt (set by
-    # AgentPromptLibrary) to keep user/assistant alternation valid.
+    # JSON enforcement lives in the system block to keep user/assistant
+    # alternation valid.
     assert [message["role"] for message in transport.payload["messages"]] == [
         "user",
     ]
+
+
+def test_anthropic_provider_does_not_duplicate_json_instruction_when_already_present() -> None:
+    class Transport:
+        def __init__(self) -> None:
+            self.payload = None
+
+        def post_json(self, url, headers, payload, timeout):
+            self.payload = payload
+            return {
+                "content": [{"type": "text", "text": "{\"ok\": true}"}],
+                "usage": {"input_tokens": 3, "output_tokens": 2},
+            }
+
+    transport = Transport()
+    provider = AnthropicMessagesProvider(
+        endpoint="https://api.example.com",
+        api_key="secret",
+        model="test-model",
+        transport=transport,
+    )
+
+    provider.complete(
+        ModelRequest(
+            agent="analyst",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Return ONLY valid JSON. No markdown.",
+                },
+                {"role": "user", "content": "Analyze ACME."},
+            ],
+            response_format="json",
+        )
+    )
+
+    # System prompt already mandates JSON-only output — provider should
+    # leave it untouched rather than tack on a redundant reminder.
+    assert transport.payload["system"] == "Return ONLY valid JSON. No markdown."
 
 
 def test_configured_provider_factory_uses_env_without_leaking_into_agents() -> None:

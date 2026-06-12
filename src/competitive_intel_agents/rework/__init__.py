@@ -181,7 +181,12 @@ class ReworkLoop:
     def _run_route(self, context: RunContext, route: list[AgentName]) -> str | None:
         final_decision: str | None = None
         for agent_name in route:
-            self._harness.reset_retry_counts(agent_name)
+            # reset_retry_counts only exists on RuntimeHarness; test
+            # doubles implementing the Harness protocol (which is just
+            # `run_agent`) need not provide it.
+            reset = getattr(self._harness, "reset_retry_counts", None)
+            if callable(reset):
+                reset(agent_name)
             result = self._harness.run_agent(context, self._build_agent(context, agent_name))
             final_decision = result.decision
         return final_decision

@@ -97,7 +97,11 @@ def test_analyst_waits_for_sources_without_calling_tools() -> None:
 
     result = analyst.run_round(make_context(), AgentState(agent="analyst", round=1))
 
-    assert result.completed is False
+    # Analyst signals missing_sources and yields control immediately;
+    # the orchestrator's collector_coverage_feedback path is responsible
+    # for routing the missing-evidence problem back to the collector via
+    # rework, so the analyst itself reports completed=True with no claims.
+    assert result.completed is True
     assert result.tool_calls == []
     assert result.output_artifact_ids == []
     assert result.signals == ["missing_sources"]

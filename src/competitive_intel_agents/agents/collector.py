@@ -128,7 +128,7 @@ class CollectorAgent(BaseAgent):
                     )
                     for j, u in enumerate(batch)
                 ]
-                self._pending_urls = fallback_urls[5:]
+                self._pending_urls = fallback_urls[8:]
                 return AgentRoundResult(
                     tool_calls=calls,
                     signals=[
@@ -164,7 +164,7 @@ class CollectorAgent(BaseAgent):
             pending = [u for u in self._pending_urls if u["url"] not in self._queried_urls and u["url"] not in self._failed_urls]
             if pending and len(now) < self._target_sources:
                 batch = pending[:8]
-                self._pending_urls = pending[5:]
+                self._pending_urls = pending[8:]
                 self._mark_fetch_scheduled(batch)
                 calls = [
                     ToolCall(
@@ -1312,11 +1312,23 @@ class CollectorAgent(BaseAgent):
     ) -> bool:
         if len(sources) >= self._target_sources:
             return True
-        # Escape hatch: if we have >= 60% of target sources and at least
-        # 2 rounds of searching, stop — diminishing returns and risk of
-        # abort from tool errors outweigh marginal coverage gains.
-        if len(sources) >= max(3, int(self._target_sources * 0.6)) and len(self._attempted_coverage_slots) > 6:
-            return True
+        # Escape hatch: if we have >= 60% of target sources, every required
+        # entity is already covered, AND the planner has already attempted
+        # the baseline coverage slots, stop — diminishing returns and risk
+        # of abort from tool errors outweigh marginal extra coverage.
+        # The entity-coverage guard is critical: without it a run can
+        # complete with sources that all describe the company but cover
+        # zero competitors, which then makes reviewer.missing_source
+        # feedback un-actionable (the collector reports done).
+        if (
+            len(sources) >= max(3, int(self._target_sources * 0.6))
+            and len(self._attempted_coverage_slots) > 6
+        ):
+            covered = self._covered_entities(sources)
+            if covered and all(
+                entity in covered for entity, _ in self._required_entities(context)
+            ):
+                return True
         if not self._coverage_attempts_complete(context):
             return False
         covered = self._covered_entities(sources)

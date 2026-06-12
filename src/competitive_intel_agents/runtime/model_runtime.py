@@ -132,9 +132,20 @@ class AnthropicMessagesProvider:
                 system_parts.append(content)
                 continue
             messages.append(message)
-        # JSON output instruction already lives in system prompts —
-        # injecting an extra user message here breaks the required
-        # user/assistant alternation in the Anthropic Messages API.
+        # When the caller asked for JSON, defensively reinforce that in the
+        # system prompt if no existing system part already mandates it.
+        # Injecting an extra user message here would break the required
+        # user/assistant alternation in the Anthropic Messages API, so we
+        # add the instruction to the system block instead — this keeps the
+        # provider safe for any future caller whose AgentPromptLibrary
+        # system prompt does not happen to end in "Return ONLY valid JSON".
+        if request.response_format == "json":
+            joined_system = "\n\n".join(system_parts).lower()
+            if "json" not in joined_system or "only" not in joined_system:
+                system_parts.append(
+                    "IMPORTANT: Respond with valid JSON only. "
+                    "No markdown, no prose, no explanation outside the JSON object."
+                )
         payload: dict[str, Any] = {
             "model": self.model,
             "max_tokens": 32768,

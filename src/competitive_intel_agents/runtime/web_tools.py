@@ -308,11 +308,19 @@ class FallbackSearch:
                     file=sys.stderr,
                 )
                 continue
+            engine_name = adapter.__class__.__name__
             for r in results:
                 url = r.get("url", "")
                 if url and url not in seen_urls:
                     seen_urls.add(url)
-                    all_results.append(r)
+                    # Tag each result with the engine that produced it so
+                    # _interleave can bucket by source engine rather than
+                    # by adjacent-domain heuristic (which degenerates to
+                    # singleton buckets when an engine returns results
+                    # spanning multiple domains).
+                    tagged = dict(r)
+                    tagged.setdefault("_engine", engine_name)
+                    all_results.append(tagged)
 
         # Interleave results from different engines so the first N results
         # aren't dominated by a single engine.  Round-robin by original
@@ -740,48 +748,69 @@ def _contains_cjk(text: str) -> bool:
 
 
 def _interleave(results: list[dict], limit: int) -> list[dict]:
-    """Interleave merged results by round-robin on original position.
+    """Interleave merged results by round-robin on source engine.
 
     If DDG returns [A0, A1, A2] and Bing returns [B0, B1, B2],
     the output is [A0, B0, A1, B1, A2, B2] \u2014 so neither engine
     dominates the top of the list.
+
+    Buckets are formed by the result's ``_engine`` tag (set by
+    FallbackSearch.search). When the tag is missing \u2014 e.g. results
+    from an older code path \u2014 we fall back to bucketing by adjacent
+    same-domain runs, preserving previous behaviour.
     """
     if not results:
         return []
-    # Results arrive grouped by engine (DDG first, then Bing, etc).
-    # Split into per-engine buckets, then interleave.
     seen_titles: set[str] = set()
-    buckets: list[list[dict]] = []
-    current_domain: str | None = None
-    current_bucket: list[dict] = []
+    buckets_by_engine: dict[str, list[dict]] = {}
+    bucket_order: list[str] = []
+    legacy_buckets: list[list[dict]] = []
+    legacy_current_domain: str | None = None
+    legacy_current_bucket: list[dict] = []
 
     for r in results:
         url = r.get("url", "")
-        # Use top-level domain as engine proxy
-        domain = parse.urlparse(url).netloc.split(".")[-2] if url else ""
         title_key = (r.get("title", "") or "")[:60]
         # Deduplicate across engines (same title likely same page)
         if title_key and title_key in seen_titles:
             continue
-        seen_titles.add(title_key)
+        if title_key:
+            seen_titles.add(title_key)
 
-        if domain != current_domain:
-            if current_bucket:
-                buckets.append(current_bucket)
-            current_bucket = [r]
-            current_domain = domain
+        engine = r.get("_engine")
+        if engine:
+            if engine not in buckets_by_engine:
+                buckets_by_engine[engine] = []
+                bucket_order.append(engine)
+            buckets_by_engine[engine].append(r)
+            continue
+
+        # Legacy path: bucket by adjacent same-domain runs.
+        domain = parse.urlparse(url).netloc.split(".")[-2] if url else ""
+        if domain != legacy_current_domain:
+            if legacy_current_bucket:
+                legacy_buckets.append(legacy_current_bucket)
+            legacy_current_bucket = [r]
+            legacy_current_domain = domain
         else:
-            current_bucket.append(r)
-    if current_bucket:
-        buckets.append(current_bucket)
+            legacy_current_bucket.append(r)
+    if legacy_current_bucket:
+        legacy_buckets.append(legacy_current_bucket)
 
-    # Round-robin across buckets
+    buckets = [buckets_by_engine[name] for name in bucket_order] + legacy_buckets
+
+    # Round-robin across buckets. Strip the internal ``_engine`` tag on
+    # the way out so consumers see the same shape FallbackSearch has
+    # always produced.
     output: list[dict] = []
     max_len = max(len(b) for b in buckets) if buckets else 0
     for i in range(max_len):
         for bucket in buckets:
             if i < len(bucket):
-                output.append(bucket[i])
+                item = bucket[i]
+                if "_engine" in item:
+                    item = {k: v for k, v in item.items() if k != "_engine"}
+                output.append(item)
                 if len(output) >= limit:
                     return output
     return output

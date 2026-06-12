@@ -137,27 +137,17 @@ class Orchestrator:
             runtime_for_agent=self._runtime_for,
         )
         remaining_feedback = list(feedback_items)
-        # Track which (issue, target_agent, target_artifact_id) triples
-        # have already been reworked and returned unchanged.
-        reworked_keys: set[tuple[str, str, str]] = set()
+        # ReworkLoop tracks per-(issue, target_agent, target_artifact_id)
+        # attempts internally and returns status="max_attempts_exceeded"
+        # once a feedback triple has consumed its budget — let it own that
+        # bookkeeping rather than gate-keeping a second time here, which
+        # would cut the per-feedback retry budget in half (the loop's
+        # _max_attempts default is 2; an outer "seen once → stalemate"
+        # gate would cap it at 1).
         for _ in range(self._max_rework_attempts):
             if not remaining_feedback:
                 break
             selected_feedback = self._select_upstream_feedback(remaining_feedback)
-            selected_key = (
-                selected_feedback.issue,
-                selected_feedback.target_agent,
-                selected_feedback.target_artifact_id,
-            )
-            if selected_key in reworked_keys:
-                return RunResult(
-                    run_id=context.run_id,
-                    status=self._status_for_unresolved_feedback(remaining_feedback),
-                    report_id=self._latest_report_id(context.run_id),
-                    review_feedback=remaining_feedback,
-                    error="rework_stalemate",
-                )
-            reworked_keys.add(selected_key)
             rework_result = loop.apply(context, selected_feedback, all_feedback=remaining_feedback)
             if rework_result.status != "applied":
                 return RunResult(

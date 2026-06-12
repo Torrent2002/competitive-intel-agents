@@ -70,10 +70,10 @@ def test_stalled_read_only_rounds_emit_stall_signal_and_abort_after_retries() ->
     result = harness.run_agent(make_context(max_rounds=4), StalledAgent())
     events = journal.list_run_events("run_001")
 
-    assert result.decision == "abort"
-    assert [event.decision for event in events] == ["retry", "abort"]
+    assert result.decision == "stop"
+    assert [event.decision for event in events] == ["retry", "stop"]
     assert "stalled_round" in events[0].signals
-    assert "max_retries_exceeded" in events[-1].signals
+    assert "max_errors_tolerated" in events[-1].signals
 
 
 def test_tool_results_are_journaled_for_diagnostics() -> None:
