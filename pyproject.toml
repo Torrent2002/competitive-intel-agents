@@ -3,7 +3,9 @@ name = "competitive-intel-agents"
 version = "0.1.0"
 description = "Auditable competitive intelligence multi-agent collaboration system."
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "curl_cffi>=0.7",
+]
 
 [project.scripts]
 competitive-intel = "competitive_intel_agents.cli:main"

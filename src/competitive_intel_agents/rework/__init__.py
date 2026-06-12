@@ -171,6 +171,7 @@ class ReworkLoop:
     def _run_route(self, context: RunContext, route: list[AgentName]) -> str | None:
         final_decision: str | None = None
         for agent_name in route:
+            self._harness.reset_retry_counts(agent_name)
             result = self._harness.run_agent(context, self._build_agent(context, agent_name))
             final_decision = result.decision
         return final_decision
