@@ -114,7 +114,7 @@ class AnthropicMessagesProvider:
         api_key: str,
         model: str,
         transport: JsonPostTransport | None = None,
-        timeout: float = 60.0,
+        timeout: float = 180.0,
     ) -> None:
         self.endpoint = endpoint.rstrip("/")
         self.api_key = api_key

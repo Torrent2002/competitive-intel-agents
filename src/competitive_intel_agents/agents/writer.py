@@ -241,21 +241,47 @@ class WriterAgent(BaseAgent):
 
         sections = resp.parsed.get("sections", {})
         if not isinstance(sections, dict) or not sections:
-            return self._template_sections(context, claims)
+            print(
+                f"[writer] LLM returned no usable sections (type={type(sections).__name__}, "
+                f"empty={not sections}); top-level keys={list(resp.parsed.keys())}",
+                file=_sys.stderr,
+            )
+            return {}
+
+        # Build a case/whitespace/separator-insensitive lookup so the LLM
+        # can return "feature_comparison" or "Feature Comparison" and still
+        # match REQUIRED_SECTIONS like "Feature comparison".
+        def _normalize_key(key: str) -> str:
+            import re as _re_k
+            return _re_k.sub(r"[\s_\-]+", "", str(key)).lower()
+
+        normalized_sections = {_normalize_key(k): v for k, v in sections.items()}
 
         # Ensure all required sections exist — handle LLM returning nested
         # objects instead of plain strings (observed: {"content":...}, {"text":...}).
         result: dict[str, str] = {}
+        missing_keys: list[str] = []
         for section in self.REQUIRED_SECTIONS:
-            value = sections.get(section, "")
+            value = sections.get(section)
+            if value is None:
+                value = normalized_sections.get(_normalize_key(section), "")
             if isinstance(value, dict):
                 value = value.get("content") or value.get("text") or str(value)
             if not isinstance(value, str):
-                value = str(value)
+                value = str(value) if value else ""
             # Strip trailing claim_id dumps like "[claim_id: claim_001, claim_002]"
             import re as _re
             value = _re.sub(r'\s*\[claim_id:\s*[^\]]*\]\s*$', '', value).strip()
+            if not value:
+                missing_keys.append(section)
             result[section] = value
+
+        if missing_keys:
+            print(
+                f"[writer] LLM output missing/empty sections: {missing_keys}; "
+                f"LLM returned keys={list(sections.keys())}",
+                file=_sys.stderr,
+            )
 
         # Record conversation and agent context on success
         if result and self._conversation_store:
