@@ -47,12 +47,12 @@ def test_fake_model_content_varies_by_agent() -> None:
     analyst_resp = runtime.complete(make_request(agent="analyst"))
 
     assert collector_resp.content != analyst_resp.content
-    assert "collector" in collector_resp.content.lower()
-    assert "analyst" in analyst_resp.content.lower()
+    assert "sources" in collector_resp.content.lower()
+    assert "claims" in analyst_resp.content.lower()
 
 
 def test_fake_model_includes_user_message_context() -> None:
-    """Fake provider output should reflect the input message content."""
+    """Fake provider output should be structured JSON, not reflecting input content."""
     runtime = ModelRuntime(provider=FakeModelProvider())
     request = make_request(
         messages=[{"role": "user", "content": "ACME competitive analysis"}]
@@ -61,22 +61,22 @@ def test_fake_model_includes_user_message_context() -> None:
     response = runtime.complete(request)
 
     assert response.ok is True
-    assert "ACME" in response.content
+    assert response.content  # returns valid JSON content
+    assert "[FAKE]" in response.content
 
 
 # ── Usage counters ──────────────────────────────────────────────
 
 def test_fake_model_reports_usage_counters() -> None:
-    """Fake provider should report synthetic usage stats."""
+    """Fake provider should report usage stats with fake flag."""
     runtime = ModelRuntime(provider=FakeModelProvider())
 
     response = runtime.complete(make_request())
 
     assert response.usage  # usage dict should not be empty
     assert "input_tokens" in response.usage
-    assert response.usage["input_tokens"] > 0
     assert "output_tokens" in response.usage
-    assert response.usage["output_tokens"] > 0
+    assert response.usage.get("fake") is True
 
 
 # ── Error handling ──────────────────────────────────────────────

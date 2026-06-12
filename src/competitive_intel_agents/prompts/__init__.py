@@ -139,6 +139,45 @@ class AgentPromptLibrary:
             temperature=0.0,
         )
 
+    def build_with_history(
+        self,
+        agent: AgentName,
+        task: str,
+        context: dict[str, Any],
+        history: list[dict[str, str]] | None = None,
+    ) -> ModelRequest:
+        """Build a model request that includes prior conversation turns.
+
+        ``history`` should contain user/assistant message pairs from a
+        ConversationStore.  The system prompt is injected once at the start;
+        older system messages from history are stripped to avoid duplication.
+        """
+        if agent not in VALID_AGENTS:
+            raise ValueError(f"invalid agent: {agent}")
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": self.SYSTEM_PROMPTS[agent]},
+        ]
+        if history:
+            for msg in history:
+                if msg.get("role") == "system":
+                    continue
+                messages.append(msg)
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"{task}\n\nContext JSON:\n"
+                    f"{json.dumps(context, sort_keys=True)}"
+                ),
+            }
+        )
+        return ModelRequest(
+            agent=agent,
+            messages=messages,
+            response_format="json",
+            temperature=0.0,
+        )
+
 
 class StructuredOutputValidator:
     """Validate provider-backed structured outputs before artifact creation."""

@@ -16,6 +16,7 @@ from competitive_intel_agents.agents import (
 from competitive_intel_agents.artifacts import ArtifactStore, InMemoryArtifactStore
 from competitive_intel_agents.harness import InMemoryCheckpointStore, RuntimeHarness
 from competitive_intel_agents.journal import InMemoryJournalStore, JournalStore
+from competitive_intel_agents.memory import ConversationStore, InMemoryConversationStore
 from competitive_intel_agents.models import (
     AgentName,
     AgentProfile,
@@ -60,6 +61,7 @@ class Orchestrator:
         enable_rework: bool = False,
         max_rework_attempts: int = 2,
         model_runtime: ModelRuntime | None = None,
+        conversation_store: ConversationStore | None = None,
     ) -> None:
         self.artifacts = artifacts or InMemoryArtifactStore()
         self.journal = journal or InMemoryJournalStore()
@@ -69,6 +71,7 @@ class Orchestrator:
         self._enable_rework = enable_rework
         self._max_rework_attempts = max_rework_attempts
         self._model_runtime = model_runtime
+        self._conversation_store = conversation_store or InMemoryConversationStore()
         self.last_context: RunContext | None = None
 
     def run(self, request: CompetitiveIntelRequest) -> RunResult:
@@ -127,6 +130,7 @@ class Orchestrator:
             max_attempts=self._max_rework_attempts,
             journal=self.journal,
             model_runtime=self._model_runtime,
+            conversation_store=self._conversation_store,
         )
         remaining_feedback = list(feedback_items)
         # Track which (issue, target_agent, target_artifact_id) triples
@@ -150,7 +154,7 @@ class Orchestrator:
                     error="rework_stalemate",
                 )
             reworked_keys.add(selected_key)
-            rework_result = loop.apply(context, selected_feedback)
+            rework_result = loop.apply(context, selected_feedback, all_feedback=remaining_feedback)
             if rework_result.status != "applied":
                 return RunResult(
                     run_id=context.run_id,
@@ -213,12 +217,13 @@ class Orchestrator:
 
     def _build_agents(self) -> list[Agent]:
         mr = self._model_runtime
+        cs = self._conversation_store
         target_sources = 10 if mr is not None else 2
         return [
             CollectorAgent(self.artifacts, target_sources=target_sources, model_runtime=mr),
-            AnalystAgent(self.artifacts, model_runtime=mr),
-            WriterAgent(self.artifacts, model_runtime=mr),
-            ReviewerAgent(self.artifacts, journal=self.journal, model_runtime=mr),
+            AnalystAgent(self.artifacts, model_runtime=mr, conversation_store=cs),
+            WriterAgent(self.artifacts, model_runtime=mr, conversation_store=cs),
+            ReviewerAgent(self.artifacts, journal=self.journal, model_runtime=mr, conversation_store=cs),
         ]
 
     def _latest_report_id(self, run_id: str) -> str | None:

@@ -13,6 +13,7 @@ from competitive_intel_agents.agents.prompt_context import (
 )
 from competitive_intel_agents.artifacts import ArtifactStore
 from competitive_intel_agents.journal import JournalStore
+from competitive_intel_agents.memory import ConversationStore
 from competitive_intel_agents.models import (
     AgentRoundResult,
     AgentState,
@@ -44,10 +45,12 @@ class ReviewerAgent(BaseAgent):
         artifacts: ArtifactStore,
         journal: JournalStore | None = None,
         model_runtime: ModelRuntime | None = None,
+        conversation_store: ConversationStore | None = None,
     ) -> None:
         self._artifacts = artifacts
         self._journal = journal
         self._model_runtime = model_runtime
+        self._conversation_store = conversation_store
 
     def run_round(self, context: RunContext, state: AgentState) -> AgentRoundResult:
         report = self._artifacts.get_latest_report(context.run_id)
@@ -140,8 +143,43 @@ class ReviewerAgent(BaseAgent):
                 ],
                 "user_questions": context.request.questions,
                 "competitors": context.request.competitors,
+                "upstream_contexts": self._artifacts.get_agent_contexts(
+                    context.run_id, "reviewer"
+                ),
             },
         )
+        history = (
+            self._conversation_store.get_history(context.run_id, self.name)
+            if self._conversation_store
+            else None
+        )
+        if history:
+            import json as _json
+            user_content = model_req.messages[-1]["content"] if model_req.messages else ""
+            model_req = prompt_lib.build_with_history(
+                self.name,
+                task,
+                model_req.messages[-1]["content"].split("\n\nContext JSON:\n")[0] if "\n\nContext JSON:\n" in model_req.messages[-1]["content"] else task,
+                {
+                    "request": request_payload(context),
+                    "report": report_json,
+                    "claims": claims_json,
+                    "sources": sources_json,
+                    "coverage": coverage_payload(context, sources.values()),
+                    "report_history": report_history_payload(
+                        self._artifacts.list_reports(context.run_id, status=None)
+                    ),
+                    "prior_review_feedback": [
+                        item.to_dict() for item in prior_feedback
+                    ],
+                    "user_questions": context.request.questions,
+                    "competitors": context.request.competitors,
+                    "upstream_contexts": self._artifacts.get_agent_contexts(
+                        context.run_id, "reviewer"
+                    ),
+                },
+                history=history,
+            )
         resp = self._model_runtime.complete(model_req)
         if not resp.ok or not resp.parsed:
             return []
@@ -188,6 +226,13 @@ class ReviewerAgent(BaseAgent):
                     dimension=item.get("dimension"),
                     question=item.get("question"),
                 )
+            )
+        # Record conversation exchange for multi-turn memory
+        if self._conversation_store:
+            self._conversation_store.append_exchange(
+                context.run_id, self.name,
+                model_req.messages[-1]["content"] if model_req.messages else "",
+                resp.content,
             )
         return result
 

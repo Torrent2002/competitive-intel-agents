@@ -69,6 +69,20 @@ class ArtifactStore(Protocol):
     def mark_rejected(self, artifact_id: str, reason: str) -> None:
         ...
 
+    def update_source_metadata(self, source_id: str, extra: dict) -> None:
+        """Merge extra metadata into an existing source artifact."""
+        ...
+
+    def save_agent_context(
+        self, run_id: str, agent_name: str, target_agent: str, context_data: dict
+    ) -> None:
+        """Store lightweight context from one agent for another to read."""
+        ...
+
+    def get_agent_contexts(self, run_id: str, target_agent: str) -> list[dict]:
+        """Read all agent contexts addressed to *target_agent* in *run_id*."""
+        ...
+
 
 class InMemoryArtifactStore:
     """In-memory artifact store for tests and local single-run usage."""
@@ -80,6 +94,7 @@ class InMemoryArtifactStore:
         self._statuses: dict[str, ArtifactStatus] = {}
         self._rejection_reasons: dict[str, str] = {}
         self._run_order: dict[str, list[tuple[str, str]]] = {}  # run_id -> [(artifact_id, type)]
+        self._agent_contexts: dict[tuple[str, str], list[dict]] = {}  # (run_id, target) -> [context_data]
 
     # --- helpers ---
 
@@ -227,6 +242,25 @@ class InMemoryArtifactStore:
         self._update_status(artifact_id, "rejected")
         self._rejection_reasons[artifact_id] = reason
 
+    def update_source_metadata(self, source_id: str, extra: dict) -> None:
+        if source_id not in self._sources:
+            return
+        source = self._sources[source_id]
+        merged = {**source.metadata, **extra}
+        self._sources[source_id] = replace(source, metadata=merged)
+
+    def save_agent_context(
+        self, run_id: str, agent_name: str, target_agent: str, context_data: dict
+    ) -> None:
+        key = (run_id, target_agent)
+        self._agent_contexts.setdefault(key, []).append({
+            "from_agent": agent_name,
+            **context_data,
+        })
+
+    def get_agent_contexts(self, run_id: str, target_agent: str) -> list[dict]:
+        return list(self._agent_contexts.get((run_id, target_agent), []))
+
 
 class SQLiteArtifactStore:
     """SQLite-backed artifact store for persistence across runs."""
@@ -245,6 +279,16 @@ class SQLiteArtifactStore:
                 payload TEXT NOT NULL,
                 rejection_reason TEXT,
                 created_at TEXT NOT NULL
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_contexts (
+                run_id TEXT NOT NULL,
+                from_agent TEXT NOT NULL,
+                target_agent TEXT NOT NULL,
+                payload TEXT NOT NULL
             )
             """
         )
@@ -430,3 +474,35 @@ class SQLiteArtifactStore:
 
     def mark_rejected(self, artifact_id: str, reason: str) -> None:
         self._update_status(artifact_id, "rejected", reason)
+
+    def update_source_metadata(self, source_id: str, extra: dict) -> None:
+        row = self._connection.execute(
+            "SELECT payload FROM artifacts WHERE id = ? AND type = 'source'",
+            (source_id,),
+        ).fetchone()
+        if row is None:
+            return
+        payload = json.loads(row[0])
+        payload.setdefault("metadata", {}).update(extra)
+        self._connection.execute(
+            "UPDATE artifacts SET payload = ? WHERE id = ?",
+            (json.dumps(payload, sort_keys=True), source_id),
+        )
+        self._connection.commit()
+
+    def save_agent_context(
+        self, run_id: str, agent_name: str, target_agent: str, context_data: dict
+    ) -> None:
+        payload = {"from_agent": agent_name, **context_data}
+        self._connection.execute(
+            "INSERT INTO agent_contexts (run_id, from_agent, target_agent, payload) VALUES (?, ?, ?, ?)",
+            (run_id, agent_name, target_agent, json.dumps(payload, sort_keys=True)),
+        )
+        self._connection.commit()
+
+    def get_agent_contexts(self, run_id: str, target_agent: str) -> list[dict]:
+        rows = self._connection.execute(
+            "SELECT payload FROM agent_contexts WHERE run_id = ? AND target_agent = ?",
+            (run_id, target_agent),
+        ).fetchall()
+        return [json.loads(row[0]) for row in rows]

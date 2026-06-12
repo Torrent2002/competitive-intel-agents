@@ -14,6 +14,7 @@ from competitive_intel_agents.agents import (
 )
 from competitive_intel_agents.artifacts import ArtifactNotFoundError, ArtifactStore
 from competitive_intel_agents.journal import JournalStore
+from competitive_intel_agents.memory import ConversationStore
 from competitive_intel_agents.models import (
     AgentName,
     AnalysisClaim,
@@ -61,15 +62,22 @@ class ReworkLoop:
         max_attempts: int = 2,
         journal: JournalStore | None = None,
         model_runtime: ModelRuntime | None = None,
+        conversation_store: ConversationStore | None = None,
     ) -> None:
         self._artifacts = artifacts
         self._harness = harness
         self._max_attempts = max_attempts
         self._journal = journal
         self._model_runtime = model_runtime
+        self._conversation_store = conversation_store
         self._attempts: dict[tuple[str, str, str], int] = {}
 
-    def apply(self, context: RunContext, feedback: ReviewFeedback) -> ReworkResult:
+    def apply(
+        self,
+        context: RunContext,
+        feedback: ReviewFeedback,
+        all_feedback: list[ReviewFeedback] | None = None,
+    ) -> ReworkResult:
         key = (feedback.issue, feedback.target_agent, feedback.target_artifact_id)
         attempts = self._attempts.get(key, 0)
         if attempts >= self._max_attempts:
@@ -84,7 +92,7 @@ class ReworkLoop:
 
         route = route_feedback(feedback)
         replacements = self._prepare_artifact_changes(context, feedback)
-        route_context = self._context_for_feedback(context, feedback)
+        route_context = self._context_with_feedback(context, all_feedback or [feedback])
         final_decision = self._run_route(route_context, route)
         return ReworkResult(
             status="applied",
@@ -186,25 +194,48 @@ class ReworkLoop:
                 model_runtime=self._model_runtime,
             )
         if agent_name == "analyst":
-            return AnalystAgent(self._artifacts, model_runtime=self._model_runtime)
+            return AnalystAgent(
+                self._artifacts,
+                model_runtime=self._model_runtime,
+                conversation_store=self._conversation_store,
+            )
         if agent_name == "writer":
-            return WriterAgent(self._artifacts, model_runtime=self._model_runtime)
+            return WriterAgent(
+                self._artifacts,
+                model_runtime=self._model_runtime,
+                conversation_store=self._conversation_store,
+            )
         return ReviewerAgent(
             self._artifacts,
             journal=self._journal,
             model_runtime=self._model_runtime,
+            conversation_store=self._conversation_store,
         )
 
-    def _context_for_feedback(
+    def _context_with_feedback(
         self,
         context: RunContext,
-        feedback: ReviewFeedback,
+        feedback_items: list[ReviewFeedback],
     ) -> RunContext:
-        if feedback.target_agent != "collector" or feedback.issue != "missing_source":
-            return context
-        plan = self._collector_rework_plan(context, feedback)
         metadata = dict(context.metadata)
-        metadata["collector_rework_plan"] = plan
+        # Group feedback by target agent so each agent reads only its own
+        by_agent: dict[str, list[dict]] = {}
+        for fb in feedback_items:
+            by_agent.setdefault(fb.target_agent, []).append({
+                "issue": fb.issue,
+                "message": fb.message,
+                "required_action": fb.required_action,
+                "severity": fb.severity,
+                "entity": fb.entity,
+                "dimension": fb.dimension,
+                "question": fb.question,
+            })
+        metadata["rework_feedback"] = by_agent
+        # Collector rework plan (for missing_source targeting collector)
+        for fb in feedback_items:
+            if fb.target_agent == "collector" and fb.issue == "missing_source":
+                metadata["collector_rework_plan"] = self._collector_rework_plan(context, fb)
+                break
         return replace(context, metadata=metadata)
 
     @staticmethod

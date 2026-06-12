@@ -13,6 +13,7 @@ from competitive_intel_agents.agents.prompt_context import (
     sources_map_payload,
 )
 from competitive_intel_agents.artifacts import ArtifactStore
+from competitive_intel_agents.memory import ConversationStore
 from competitive_intel_agents.models import (
     AgentRoundResult,
     AgentState,
@@ -40,17 +41,27 @@ class WriterAgent(BaseAgent):
         self,
         artifacts: ArtifactStore,
         model_runtime: ModelRuntime | None = None,
+        conversation_store: ConversationStore | None = None,
     ) -> None:
         self._artifacts = artifacts
         self._model_runtime = model_runtime
+        self._conversation_store = conversation_store
 
     def run_round(self, context: RunContext, state: AgentState) -> AgentRoundResult:
+        rework_feedback = (
+            context.metadata.get("rework_feedback", {}).get("writer", [])
+        )
         existing_report = self._artifacts.get_latest_report(context.run_id)
-        if existing_report is not None:
+        if existing_report is not None and not rework_feedback:
             return AgentRoundResult(
                 completed=True,
                 output_artifact_ids=[],
                 signals=["report_ready"],
+            )
+        # Rework: reject existing report so we can create a fresh one
+        if existing_report is not None and rework_feedback:
+            self._artifacts.mark_rejected(
+                existing_report.id, "Rewriting based on reviewer feedback"
             )
 
         claims = self._artifacts.list_claims(context.run_id)
@@ -100,21 +111,32 @@ class WriterAgent(BaseAgent):
         context: RunContext,
         claims: list[AnalysisClaim],
     ) -> dict[str, str]:
-        """Use model to compose a structured report from claims."""
+        """Use model to compose a structured report from claims and all sources."""
         from competitive_intel_agents.prompts import AgentPromptLibrary, StructuredOutputValidator
 
         prompt_lib = AgentPromptLibrary()
         claims_json = claims_list_payload(claims)
-        claim_source_ids = {
-            source_id
-            for claim in claims
-            for source_id in claim.source_ids
-        }
-        sources = filter_quality_sources([
-            source
-            for source in self._artifacts.list_sources(context.run_id)
-            if source.id in claim_source_ids
-        ])
+        sources = filter_quality_sources(
+            self._artifacts.list_sources(context.run_id)
+        )
+
+        # Build assessed sources context from analyst assessments
+        assessed_sources = []
+        for source in sources:
+            assessment = source.metadata.get("analyst_assessment")
+            if assessment:
+                assessed_sources.append({
+                    "source_id": source.id,
+                    "title": source.title,
+                    "url": source.url,
+                    "relevance": assessment.get("relevance", "medium"),
+                    "credibility": assessment.get("credibility", "medium"),
+                    "covered_aspects": assessment.get("covered_aspects", []),
+                    "key_insight": assessment.get("key_insight", ""),
+                })
+
+        # Read upstream agent context (analyst's notes for writer)
+        upstream_contexts = self._artifacts.get_agent_contexts(context.run_id, "writer")
 
         questions_str = ", ".join(context.request.questions) if context.request.questions else "competitive positioning and market evidence"
         task = (
@@ -137,22 +159,52 @@ class WriterAgent(BaseAgent):
             f"6. Each section: 2-4 paragraphs of substantive analysis. "
             f"Include [claim_id] references inline.\n"
             f"7. The 'Sources' section should list each source with its title, url, and "
-            f"a one-line quality assessment.\n\n"
-            f"Return JSON: {{\"sections\": {{...}}, \"claim_ids\": [...], \"source_ids\": [...]}}"
+            f"a one-line quality assessment.\n"
+            f"8. You have access to ALL collected sources, not just those with claims. "
+            f"Sources include analyst assessments — use them to judge which sources to trust. "
+            f"Draw from all available material to write a comprehensive report.\n\n"
+            f"Return JSON: {{\"sections\": {{...}}, \"claim_ids\": [...], \"source_ids\": [...], "
+            f"\"decisions\": [...]}}\n"
+            f"Each decision: {{\"type\": str (e.g. source_deprioritized|section_gap_acknowledged|"
+            f"claim_interpreted), \"target_id\": str, \"reason\": str}} — explain why you "
+            f"deprioritized a source, acknowledged a gap, or interpreted a claim in a certain way."
         )
-        model_req = prompt_lib.build(
-            self.name,
-            task,
-            {
-                "request": request_payload(context),
-                "company": context.request.company,
-                "market": context.request.market,
-                "competitors": context.request.competitors,
-                "claims": claims_json,
-                "sources": sources_map_payload(sources),
-                "coverage": coverage_payload(context, sources),
-            },
+        # Include reviewer feedback for rework
+        rework_feedback = context.metadata.get("rework_feedback", {}).get("writer", [])
+        if rework_feedback:
+            feedback_lines = "\n".join(
+                f"- [{fb['severity']}] {fb['message']} (Action: {fb['required_action']})"
+                for fb in rework_feedback
+            )
+            task += (
+                f"\n\nREVIEWER FEEDBACK — you MUST address these issues:\n"
+                f"{feedback_lines}\n"
+                f"Rewrite the report to fix every item above."
+            )
+        prompt_context_data = {
+            "request": request_payload(context),
+            "company": context.request.company,
+            "market": context.request.market,
+            "competitors": context.request.competitors,
+            "claims": claims_json,
+            "sources": sources_map_payload(sources),
+            "assessed_sources": assessed_sources,
+            "coverage": coverage_payload(context, sources),
+            "upstream_contexts": upstream_contexts,
+        }
+        import json as _json
+        user_content = f"{task}\n\nContext JSON:\n{_json.dumps(prompt_context_data, sort_keys=True)}"
+        history = (
+            self._conversation_store.get_history(context.run_id, self.name)
+            if self._conversation_store
+            else None
         )
+        if history:
+            model_req = prompt_lib.build_with_history(
+                self.name, task, prompt_context_data, history=history,
+            )
+        else:
+            model_req = prompt_lib.build(self.name, task, prompt_context_data)
         resp = self._model_runtime.complete(model_req)
         if not resp.ok or not resp.parsed:
             print(
@@ -176,6 +228,22 @@ class WriterAgent(BaseAgent):
         result: dict[str, str] = {}
         for section in self.REQUIRED_SECTIONS:
             result[section] = str(sections.get(section, ""))
+
+        # Record conversation and agent context on success
+        if result and self._conversation_store:
+            self._conversation_store.append_exchange(
+                context.run_id, self.name, user_content, resp.content,
+            )
+        if result:
+            decisions = resp.parsed.get("decisions", [])
+            self._artifacts.save_agent_context(
+                context.run_id, self.name, "reviewer",
+                {
+                    "decisions": decisions,
+                    "sections_written": list(result.keys()),
+                },
+            )
+
         return result
 
     def _template_sections(

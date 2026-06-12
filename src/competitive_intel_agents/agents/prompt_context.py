@@ -318,7 +318,7 @@ def _source_quality(source: SourceArtifact) -> str:
     if metadata.get("extract_quality") in {"empty", "js_required"}:
         return "weak"
     score = metadata.get("source_score")
-    if isinstance(score, (int, float)) and score < 0:
+    if isinstance(score, (int, float)) and score < 0 and metadata.get("extract_quality") != "good":
         return "weak"
     return "strong"
 
@@ -341,7 +341,7 @@ def filter_quality_sources(
 
         if eq in ("js_required", "empty"):
             continue
-        if isinstance(score, (int, float)) and score < 0:
+        if isinstance(score, (int, float)) and score < 0 and eq != "good":
             continue
         if min_quality == "strong" and eq != "good":
             continue

@@ -996,6 +996,7 @@ class CollectorAgent(BaseAgent):
         snippet = str(result.get("snippet", ""))
         metadata = dict(result.get("metadata", {}))
         haystack = f"{url} {title} {snippet}".lower()
+        url_title_haystack = f"{url} {title}".lower()
         domain = urlparse(url).netloc.lower()
         score = 0
         score += {
@@ -1034,7 +1035,7 @@ class CollectorAgent(BaseAgent):
             )
         ):
             score -= 30
-        if any(token in haystack for token in ("下载", "download", "appdetail")):
+        if any(token in url_title_haystack for token in ("下载", "download", "appdetail")):
             score -= 10
         return score
 
