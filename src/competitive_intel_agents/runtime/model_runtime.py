@@ -39,24 +39,38 @@ class Provider(Protocol):
 
 
 class FakeModelProvider:
-    """Deterministic fake model for tests — no API calls, no credentials."""
+    """Deterministic fake model for tests — no API calls, no credentials.
+
+    Returns structured JSON so downstream agents parse it, but every
+    value is clearly marked [FAKE] to prevent silent misinterpretation.
+    """
 
     @staticmethod
     def complete(request: ModelRequest) -> dict[str, Any]:
-        messages_text = " ".join(
-            m.get("content", "") for m in request.messages if m.get("content")
+        import sys as _sys
+        print(
+            f"[model] WARNING: FakeModelProvider used for agent={request.agent} — "
+            f"no real model configured",
+            file=_sys.stderr,
         )
-        content = (
-            f"[Fake {request.agent} response] "
-            f"Based on the input: \"{messages_text}\". "
-            f"This is deterministic fake output for testing."
-        )
+        agent = request.agent or "unknown"
+        if agent == "analyst":
+            content = '{"claims": [{"text": "[FAKE] No real model configured", "source_ids": [], "confidence": "low", "reasoning": "FakeModelProvider active"}]}'
+        elif agent == "writer":
+            content = '{"sections": {"Overview": "[FAKE] No real model configured", "Feature comparison": "", "Pricing": "", "SWOT": "", "Sources": ""}, "claim_ids": [], "source_ids": []}'
+        elif agent == "reviewer":
+            content = '{"feedback": [{"issue": "unsupported_claim", "target_agent": "writer", "target_artifact_id": "report", "message": "[FAKE] No real model configured — cannot verify report", "required_action": "Configure a real model in config/model.json", "severity": "blocking"}]}'
+        elif agent == "collector":
+            content = '{"sources": []}'
+        else:
+            content = f'{{"result": "[FAKE] No real model configured for {agent}"}}'
         return {
             "ok": True,
             "content": content,
             "usage": {
-                "input_tokens": max(10, len(messages_text) // 4),
-                "output_tokens": max(5, len(content) // 4),
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "fake": True,
             },
         }
 

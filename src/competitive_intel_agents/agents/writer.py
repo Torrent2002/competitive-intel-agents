@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys as _sys
+
 from competitive_intel_agents.agents.base import BaseAgent
 from competitive_intel_agents.agents.prompt_context import (
     claims_list_payload,
@@ -58,10 +60,23 @@ class WriterAgent(BaseAgent):
                 signals=["missing_claims"],
             )
 
+        template_fallback = False
         if self._model_runtime is not None:
             sections = self._model_sections(context, claims)
+            if not sections or all(not v for v in sections.values()):
+                print(
+                    "[writer] WARNING: model failed, falling back to template report",
+                    file=_sys.stderr,
+                )
+                sections = self._template_sections(context, claims)
+                template_fallback = True
         else:
+            print(
+                "[writer] WARNING: no model runtime, using template report",
+                file=_sys.stderr,
+            )
             sections = self._template_sections(context, claims)
+            template_fallback = True
 
         report = ReportDraft(
             id=self._next_report_id(context.run_id),
@@ -71,10 +86,13 @@ class WriterAgent(BaseAgent):
             source_ids=self._source_ids(claims),
         )
         self._artifacts.save_report(report)
+        signals = ["report_created"]
+        if template_fallback:
+            signals.append("template_fallback")
         return AgentRoundResult(
             completed=True,
             output_artifact_ids=[report.id],
-            signals=["report_created"],
+            signals=signals,
         )
 
     def _model_sections(
@@ -137,13 +155,18 @@ class WriterAgent(BaseAgent):
         )
         resp = self._model_runtime.complete(model_req)
         if not resp.ok or not resp.parsed:
-            return self._template_sections(context, claims)
+            print(
+                f"[writer] model call failed: ok={resp.ok} parsed={resp.parsed is not None} error={resp.error}",
+                file=_sys.stderr,
+            )
+            return {}
 
         validator = StructuredOutputValidator()
         try:
             validator.validate(self.name, resp.parsed)
-        except Exception:
-            return self._template_sections(context, claims)
+        except Exception as exc:
+            print(f"[writer] validation failed: {exc}", file=_sys.stderr)
+            return {}
 
         sections = resp.parsed.get("sections", {})
         if not isinstance(sections, dict) or not sections:

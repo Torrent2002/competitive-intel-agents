@@ -965,11 +965,16 @@ class CollectorAgent(BaseAgent):
         })
         resp = self._model_runtime.complete(model_req)
         if not resp.ok or not resp.parsed:
-            # Model failed — fall back to algorithmic scoring
+            print(
+                f"[collector] URL selection model failed: ok={resp.ok} error={resp.error}, "
+                f"using algorithmic scoring",
+                file=_sys.stderr,
+            )
             return self._select_urls(results, count)
 
         indices = resp.parsed.get("selected_indices", [])
         if not isinstance(indices, list) or len(indices) < 1:
+            print("[collector] URL selection returned invalid indices, using algorithmic scoring", file=_sys.stderr)
             return self._select_urls(results, count)
 
         selected: list[dict] = []

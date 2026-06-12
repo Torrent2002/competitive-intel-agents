@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys as _sys
 
 from competitive_intel_agents.agents.base import BaseAgent
 from competitive_intel_agents.agents.prompt_context import (
@@ -58,10 +59,23 @@ class AnalystAgent(BaseAgent):
             )
 
         saved_ids: list[str] = []
+        template_fallback = False
         if self._model_runtime is not None:
             saved_ids = self._model_claims(context, sources, existing_claims)
+            if not saved_ids:
+                print(
+                    "[analyst] WARNING: model failed, falling back to template claims",
+                    file=_sys.stderr,
+                )
+                saved_ids = self._template_claims(context, sources, existing_claims)
+                template_fallback = True
         else:
+            print(
+                "[analyst] WARNING: no model runtime, using template claims",
+                file=_sys.stderr,
+            )
             saved_ids = self._template_claims(context, sources, existing_claims)
+            template_fallback = True
 
         claims_after_save = self._artifacts.list_claims(context.run_id)
         completed = (
@@ -78,6 +92,8 @@ class AnalystAgent(BaseAgent):
             signals = ["claims_ready"]
         else:
             signals = ["insufficient_sources"]
+        if template_fallback:
+            signals.append("template_fallback")
         return AgentRoundResult(
             completed=completed,
             output_artifact_ids=saved_ids,
@@ -143,13 +159,18 @@ class AnalystAgent(BaseAgent):
         )
         resp = self._model_runtime.complete(model_req)
         if not resp.ok or not resp.parsed:
-            return self._template_claims(context, sources, existing_claims)
+            print(
+                f"[analyst] model call failed: ok={resp.ok} parsed={resp.parsed is not None} error={resp.error}",
+                file=_sys.stderr,
+            )
+            return []
 
         validator = StructuredOutputValidator()
         try:
             validator.validate(self.name, resp.parsed)
-        except Exception:
-            return self._template_claims(context, sources, existing_claims)
+        except Exception as exc:
+            print(f"[analyst] validation failed: {exc}", file=_sys.stderr)
+            return []
 
         claims_payload = resp.parsed.get("claims", [])
         saved_ids: list[str] = []
