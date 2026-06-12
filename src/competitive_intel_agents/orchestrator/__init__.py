@@ -27,7 +27,7 @@ from competitive_intel_agents.models import (
 )
 from competitive_intel_agents.rework import ReworkLoop
 from competitive_intel_agents.runtime import FakeWebFetch, FakeWebSearch, ToolRuntime
-from competitive_intel_agents.runtime.model_runtime import ModelRuntime
+from competitive_intel_agents.runtime.model_runtime import ConfiguredProviderFactory, ModelRuntime
 
 
 class Harness(Protocol):
@@ -72,6 +72,9 @@ class Orchestrator:
         self._max_rework_attempts = max_rework_attempts
         self._model_runtime = model_runtime
         self._conversation_store = conversation_store or InMemoryConversationStore()
+        self._runtimes_by_agent: dict[str, ModelRuntime] = {}
+        if model_runtime is not None:
+            self._runtimes_by_agent["_default"] = model_runtime
         self.last_context: RunContext | None = None
 
     def run(self, request: CompetitiveIntelRequest) -> RunResult:
@@ -131,6 +134,7 @@ class Orchestrator:
             journal=self.journal,
             model_runtime=self._model_runtime,
             conversation_store=self._conversation_store,
+            runtime_for_agent=self._runtime_for,
         )
         remaining_feedback = list(feedback_items)
         # Track which (issue, target_agent, target_artifact_id) triples
@@ -215,15 +219,40 @@ class Orchestrator:
             return "needs_more_evidence"
         return "rework_failed"
 
+    def _runtime_for(self, agent_name: str) -> ModelRuntime | None:
+        """Get ModelRuntime for a specific agent, using per-agent model config."""
+        if self._model_runtime is None:
+            return None
+        if agent_name not in self._runtimes_by_agent:
+            try:
+                factory = ConfiguredProviderFactory()
+                provider = factory.create_for_agent(agent_name)
+                self._runtimes_by_agent[agent_name] = ModelRuntime(provider=provider)
+            except (ValueError, RuntimeError):
+                self._runtimes_by_agent[agent_name] = self._model_runtime
+        return self._runtimes_by_agent.get(agent_name, self._model_runtime)
+
     def _build_agents(self) -> list[Agent]:
-        mr = self._model_runtime
         cs = self._conversation_store
-        target_sources = 10 if mr is not None else 2
+        target_sources = 10 if self._model_runtime is not None else 2
         return [
-            CollectorAgent(self.artifacts, target_sources=target_sources, model_runtime=mr),
-            AnalystAgent(self.artifacts, model_runtime=mr, conversation_store=cs),
-            WriterAgent(self.artifacts, model_runtime=mr, conversation_store=cs),
-            ReviewerAgent(self.artifacts, journal=self.journal, model_runtime=mr, conversation_store=cs),
+            CollectorAgent(
+                self.artifacts, target_sources=target_sources,
+                model_runtime=self._runtime_for("collector"),
+            ),
+            AnalystAgent(
+                self.artifacts, model_runtime=self._runtime_for("analyst"),
+                conversation_store=cs,
+            ),
+            WriterAgent(
+                self.artifacts, model_runtime=self._runtime_for("writer"),
+                conversation_store=cs,
+            ),
+            ReviewerAgent(
+                self.artifacts, journal=self.journal,
+                model_runtime=self._runtime_for("reviewer"),
+                conversation_store=cs,
+            ),
         ]
 
     def _latest_report_id(self, run_id: str) -> str | None:

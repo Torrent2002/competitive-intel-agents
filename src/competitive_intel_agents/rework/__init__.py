@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Protocol
+from typing import Callable, Protocol
 
 from competitive_intel_agents.agents import (
     Agent,
@@ -63,6 +63,7 @@ class ReworkLoop:
         journal: JournalStore | None = None,
         model_runtime: ModelRuntime | None = None,
         conversation_store: ConversationStore | None = None,
+        runtime_for_agent: Callable[[str], ModelRuntime | None] | None = None,
     ) -> None:
         self._artifacts = artifacts
         self._harness = harness
@@ -70,6 +71,7 @@ class ReworkLoop:
         self._journal = journal
         self._model_runtime = model_runtime
         self._conversation_store = conversation_store
+        self._runtime_for_agent = runtime_for_agent
         self._attempts: dict[tuple[str, str, str], int] = {}
 
     def apply(
@@ -184,6 +186,11 @@ class ReworkLoop:
             final_decision = result.decision
         return final_decision
 
+    def _runtime_for(self, agent_name: str) -> ModelRuntime | None:
+        if self._runtime_for_agent:
+            return self._runtime_for_agent(agent_name)
+        return self._model_runtime
+
     def _build_agent(self, context: RunContext, agent_name: AgentName) -> Agent:
         if agent_name == "collector":
             existing_sources = self._artifacts.list_sources(context.run_id)
@@ -191,24 +198,24 @@ class ReworkLoop:
             return CollectorAgent(
                 self._artifacts,
                 target_sources=target_sources,
-                model_runtime=self._model_runtime,
+                model_runtime=self._runtime_for(agent_name),
             )
         if agent_name == "analyst":
             return AnalystAgent(
                 self._artifacts,
-                model_runtime=self._model_runtime,
+                model_runtime=self._runtime_for(agent_name),
                 conversation_store=self._conversation_store,
             )
         if agent_name == "writer":
             return WriterAgent(
                 self._artifacts,
-                model_runtime=self._model_runtime,
+                model_runtime=self._runtime_for(agent_name),
                 conversation_store=self._conversation_store,
             )
         return ReviewerAgent(
             self._artifacts,
             journal=self._journal,
-            model_runtime=self._model_runtime,
+            model_runtime=self._runtime_for(agent_name),
             conversation_store=self._conversation_store,
         )
 

@@ -258,33 +258,44 @@ class ConfiguredProviderFactory:
             return cfg_val
         return default
 
-    def create(self) -> Provider:
+    def _resolve_provider_config(self, overrides: dict | None = None) -> tuple[str, str, str, str]:
+        """Resolve (provider, endpoint, api_key, model) with optional per-agent overrides."""
         provider = self._get("CIA_MODEL_PROVIDER") or self._get("provider") or "fake"
+        endpoint = self._get("CIA_MODEL_ENDPOINT") or self._get("endpoint")
+        api_key = self._get("CIA_MODEL_API_KEY") or self._get("api_key")
+        model = self._get("CIA_MODEL_NAME") or self._get("model")
+        if overrides:
+            model = overrides.get("model", model)
+        return provider, endpoint, api_key, model
+
+    def _build_provider(self, provider: str, endpoint: str, api_key: str, model: str) -> Provider:
         if provider == "fake":
             return FakeModelProvider()
         if provider == "openai-compatible":
-            endpoint = self._get("CIA_MODEL_ENDPOINT") or self._get("endpoint")
-            api_key = self._get("CIA_MODEL_API_KEY") or self._get("api_key")
-            model = self._get("CIA_MODEL_NAME") or self._get("model")
             if not endpoint or not api_key or not model:
-                raise ValueError(
-                    "Set CIA_MODEL_ENDPOINT/CIA_MODEL_API_KEY/CIA_MODEL_NAME "
-                    "or copy config/model.example.json to config/model.json"
-                )
+                raise ValueError("Missing endpoint/api_key/model for openai-compatible provider")
             return HttpModelProvider(endpoint=endpoint, api_key=api_key, model=model)
         if provider == "anthropic-compatible":
-            endpoint = self._get("CIA_MODEL_ENDPOINT") or self._get("endpoint")
-            api_key = self._get("CIA_MODEL_API_KEY") or self._get("api_key")
-            model = self._get("CIA_MODEL_NAME") or self._get("model")
             if not endpoint or not api_key or not model:
-                raise ValueError(
-                    "Set CIA_MODEL_ENDPOINT/CIA_MODEL_API_KEY/CIA_MODEL_NAME "
-                    "or copy config/model.example.json to config/model.json"
-                )
-            return AnthropicMessagesProvider(
-                endpoint=endpoint, api_key=api_key, model=model
-            )
+                raise ValueError("Missing endpoint/api_key/model for anthropic-compatible provider")
+            return AnthropicMessagesProvider(endpoint=endpoint, api_key=api_key, model=model)
         raise ValueError(f"unsupported model provider: {provider}")
+
+    def create(self) -> Provider:
+        provider, endpoint, api_key, model = self._resolve_provider_config()
+        return self._build_provider(provider, endpoint, api_key, model)
+
+    def create_for_agent(self, agent_name: str) -> Provider:
+        """Create a provider with per-agent model overrides from config.
+
+        Config format: ``{"per_agent": {"writer": {"model": "..."}, ...}}``
+        Falls back to default config if no override exists for *agent_name*.
+        """
+        cfg = self._load_config()
+        per_agent = cfg.get("per_agent", {})
+        overrides = per_agent.get(agent_name) if isinstance(per_agent, dict) else None
+        provider, endpoint, api_key, model = self._resolve_provider_config(overrides)
+        return self._build_provider(provider, endpoint, api_key, model)
 
 
 class ModelRuntime:
