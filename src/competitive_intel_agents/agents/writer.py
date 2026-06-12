@@ -151,6 +151,13 @@ class WriterAgent(BaseAgent):
             f"({'vs ' + ', '.join(context.request.competitors) if context.request.competitors else ''}).\n"
             f"The user asked: {questions_str}\n\n"
             f"Write sections: {', '.join(self.REQUIRED_SECTIONS)}.\n\n"
+            f"WRITING STYLE:\n"
+            f"- Write as a professional analyst, not a blogger. Be direct and factual.\n"
+            f"- Keep Overview concise (3-4 sentences of positioning + key metrics).\n"
+            f"- Feature comparison should be organized by dimension, not a laundry list.\n"
+            f"- Pricing should focus on model differences, not line-item prices.\n"
+            f"- SWOT should be actionable insights, not generic observations.\n"
+            f"- Do NOT repeat the same data across multiple sections.\n\n"
             f"CRITICAL RULES:\n"
             f"1. THINK CRITICALLY — do not parrot claims verbatim. Evaluate each claim's "
             f"confidence and source quality before including it.\n"
@@ -164,12 +171,13 @@ class WriterAgent(BaseAgent):
             f"5. SYNTHESIZE — combine related claims into coherent analysis, don't just list them.\n"
             f"6. Write each section with enough depth to be genuinely useful to a decision-maker. "
             f"Aim for thorough, evidence-rich paragraphs.\n"
-            f"7. CITATION FORMAT — use numbered references like [1], [2], etc. in the body text. "
-            f"Do NOT use [claim_xxx] or [source_xxx] inline. Each number maps to a source listed "
-            f"in the 'Sources' section. The 'Sources' section should be a numbered reference list:\n"
-            f"   [1] Title (URL) — one-line quality assessment\n"
-            f"   [2] Title (URL) — one-line quality assessment\n"
-            f"   Group multiple citations: [1][2] or [1,3,5].\n"
+            f"7. CITATION FORMAT — USE NUMBERED REFERENCES [1], [2], etc. in the body text. "
+            f"NEVER write [claim_xxx] or [source_xxx] or [claim_id: ...] anywhere. "
+            f"The 'Sources' section must be a numbered reference list like:\n"
+            f"   [1] Title — URL — one-line quality assessment\n"
+            f"   [2] Title — URL — one-line quality assessment\n"
+            f"   Group multiple citations: [1,3] or [1][3].\n"
+            f"   Do NOT append claim_id lists at the end of sections.\n"
             f"8. You have access to ALL collected sources, not just those with claims. "
             f"Sources include analyst assessments — use them to judge which sources to trust. "
             f"Draw from all available material to write a comprehensive report.\n\n"
@@ -235,15 +243,18 @@ class WriterAgent(BaseAgent):
         if not isinstance(sections, dict) or not sections:
             return self._template_sections(context, claims)
 
-        # Ensure all required sections exist — handle both flat string and
-        # nested {"content": "...", "claim_ids": [...]} formats from the LLM.
+        # Ensure all required sections exist — handle LLM returning nested
+        # objects instead of plain strings (observed: {"content":...}, {"text":...}).
         result: dict[str, str] = {}
         for section in self.REQUIRED_SECTIONS:
             value = sections.get(section, "")
             if isinstance(value, dict):
-                value = value.get("content", str(value))
+                value = value.get("content") or value.get("text") or str(value)
             if not isinstance(value, str):
                 value = str(value)
+            # Strip trailing claim_id dumps like "[claim_id: claim_001, claim_002]"
+            import re as _re
+            value = _re.sub(r'\s*\[claim_id:\s*[^\]]*\]\s*$', '', value).strip()
             result[section] = value
 
         # Record conversation and agent context on success
