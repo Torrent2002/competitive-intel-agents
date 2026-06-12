@@ -79,10 +79,20 @@ class ReviewerAgent(BaseAgent):
         # Always run rule-based checks (deterministic, fast, no model needed)
         rule_feedback = self._review_report(report, claims, sources, context)
 
-        # If model is available, also run deeper semantic review
+        # If model is available, also run deeper semantic review.
+        # When LLM is present, question coverage is checked semantically
+        # by _model_review — skip the rule-based keyword matcher to avoid
+        # false positives from literal matching.
         model_feedback: list[ReviewFeedback] = []
         if self._model_runtime is not None:
             model_feedback = self._model_review(report, claims, sources, context)
+            # Remove rule-based question coverage false positives when LLM
+            # did its own semantic check — the LLM's verdict is authoritative.
+            rule_feedback = [
+                fb for fb in rule_feedback
+                if not (fb.issue == "missing_source"
+                        and fb.target_artifact_id.startswith("question_coverage:"))
+            ]
 
         all_feedback = _unique_feedback(rule_feedback + model_feedback)
         if all_feedback:
@@ -601,7 +611,13 @@ def _text_covers_topic(text: str, topic: str) -> bool:
     tokens = _topic_tokens(topic)
     if not tokens:
         return False
-    return all(token in text_normalized for token in tokens)
+    # For sliding-window tokens (Chinese 2-grams), require majority match
+    # rather than all — avoids false negatives from intermediate bigrams
+    # like "能差" that rarely appear in natural text.
+    if len(tokens) <= 2:
+        return all(token in text_normalized for token in tokens)
+    matches = sum(1 for token in tokens if token in text_normalized)
+    return matches >= len(tokens) / 2
 
 
 def _normalize_text(text: str) -> str:
@@ -612,11 +628,22 @@ def _topic_tokens(topic: str) -> list[str]:
     import re
 
     if any("\u4e00" <= char <= "\u9fff" for char in topic):
-        return [
+        # For Chinese topics, split into sub-phrases then break each
+        # into 2-char sliding windows.  "功能差异" → ["功能", "能差", "差异"]
+        # so it matches text containing "差异化" or "功能" without exact match.
+        sub_phrases = [
             part
             for part in re.split(r"[\s,，、;；/]+", topic)
             if len(part) >= 2
         ]
+        tokens: list[str] = []
+        for phrase in sub_phrases:
+            if len(phrase) <= 2:
+                tokens.append(phrase)
+            else:
+                for i in range(len(phrase) - 1):
+                    tokens.append(phrase[i:i + 2])
+        return tokens
     stopwords = {"and", "or", "the", "a", "an", "of", "to", "in", "for"}
     return [
         token
