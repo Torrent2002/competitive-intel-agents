@@ -25,6 +25,7 @@ from competitive_intel_agents.runtime import (
     ToolRuntime,
     WebFetchTool,
     WebSearchTool,
+    make_default_search_adapter,
 )
 from competitive_intel_agents.harness import InMemoryCheckpointStore, RuntimeHarness
 
@@ -796,7 +797,7 @@ def _make_web_orchestrator(
         )
 
     tools = ToolRuntime()
-    tools.register(WebSearchTool(FallbackSearch([DuckDuckGoSearch(timeout=8), BingSearch()])))
+    tools.register(WebSearchTool(make_default_search_adapter()))
     fetch_tool = PersistedContentTool(
         WebFetchTool(max_chars=None),
         content_store=LocalContentStore(workspace.path / "content"),
