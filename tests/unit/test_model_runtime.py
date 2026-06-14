@@ -1,14 +1,19 @@
 """Tests for the Model Runtime (Module 07)."""
 
 import json
+from unittest import mock
+from urllib import error
 
 import pytest
 
 from competitive_intel_agents.models import ModelRequest
 from competitive_intel_agents.runtime.model_runtime import (
     FakeModelProvider,
+    JsonPostTransport,
     ModelRuntime,
+    NonRetryableProviderError,
     Provider,
+    RetryableProviderError,
 )
 
 
@@ -161,3 +166,155 @@ def test_custom_provider_matches_protocol() -> None:
 
     assert response.ok is True
     assert response.content == "custom output"
+
+
+# ── Retry behavior (Module 32) ──────────────────────────────────
+
+
+class _ScriptedProvider:
+    """Provider that yields a sequence of outcomes (exception or dict)."""
+
+    def __init__(self, outcomes: list) -> None:
+        self._outcomes = list(outcomes)
+        self.calls = 0
+
+    def complete(self, request: ModelRequest):
+        self.calls += 1
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+def test_model_runtime_retries_on_retryable_error_then_succeeds() -> None:
+    """Retryable provider errors should retry up to max_retries before succeeding."""
+
+    sleeps: list[float] = []
+    provider = _ScriptedProvider(
+        [
+            RetryableProviderError("HTTP 429 Too Many Requests"),
+            RetryableProviderError("HTTP 503 Service Unavailable"),
+            {"ok": True, "content": "third time lucky", "usage": {}},
+        ]
+    )
+    runtime = ModelRuntime(
+        provider=provider,
+        max_retries=3,
+        backoff_base=1.0,
+        sleep=sleeps.append,
+    )
+
+    response = runtime.complete(make_request())
+
+    assert response.ok is True
+    assert response.content == "third time lucky"
+    assert provider.calls == 3
+    # Backoff between attempts: 1s after first failure, 2s after second.
+    assert sleeps == [1.0, 2.0]
+
+
+def test_model_runtime_does_not_retry_on_non_retryable() -> None:
+    """4xx-class errors must fail immediately — retrying just burns budget."""
+
+    sleeps: list[float] = []
+    provider = _ScriptedProvider(
+        [NonRetryableProviderError("HTTP 401 Unauthorized")]
+    )
+    runtime = ModelRuntime(
+        provider=provider,
+        max_retries=3,
+        sleep=sleeps.append,
+    )
+
+    response = runtime.complete(make_request())
+
+    assert response.ok is False
+    assert response.error is not None
+    assert "401" in response.error
+    assert provider.calls == 1
+    assert sleeps == []
+
+
+def test_model_runtime_returns_failed_after_exhausting_retries() -> None:
+    """When every attempt is retryable, the runtime gives up after max_retries."""
+
+    sleeps: list[float] = []
+    provider = _ScriptedProvider(
+        [
+            RetryableProviderError("attempt 1 boom"),
+            RetryableProviderError("attempt 2 boom"),
+            RetryableProviderError("attempt 3 boom"),
+            RetryableProviderError("attempt 4 boom"),
+        ]
+    )
+    runtime = ModelRuntime(
+        provider=provider,
+        max_retries=3,
+        backoff_base=1.0,
+        backoff_max=8.0,
+        sleep=sleeps.append,
+    )
+
+    response = runtime.complete(make_request())
+
+    assert response.ok is False
+    assert response.error is not None
+    assert "attempt 4 boom" in response.error
+    # 1 initial attempt + 3 retries = 4 total calls
+    assert provider.calls == 4
+    # Backoff: 1s, 2s, 4s (each capped by backoff_max=8)
+    assert sleeps == [1.0, 2.0, 4.0]
+
+
+def test_json_post_transport_classifies_429_as_retryable() -> None:
+    """JsonPostTransport should map HTTP 429 to RetryableProviderError."""
+
+    transport = JsonPostTransport()
+    fake_error = error.HTTPError(
+        "https://example.com/v1",
+        429,
+        "Too Many Requests",
+        hdrs=None,
+        fp=None,
+    )
+
+    with mock.patch(
+        "competitive_intel_agents.runtime.model_runtime.urlrequest.urlopen",
+        side_effect=fake_error,
+    ):
+        with pytest.raises(RetryableProviderError) as excinfo:
+            transport.post_json(
+                "https://example.com/v1",
+                headers={},
+                payload={"q": "ping"},
+                timeout=1.0,
+            )
+
+    assert "429" in str(excinfo.value)
+
+
+def test_json_post_transport_classifies_400_as_non_retryable() -> None:
+    """JsonPostTransport should map HTTP 400 to NonRetryableProviderError."""
+
+    transport = JsonPostTransport()
+    fake_error = error.HTTPError(
+        "https://example.com/v1",
+        400,
+        "Bad Request",
+        hdrs=None,
+        fp=None,
+    )
+
+    with mock.patch(
+        "competitive_intel_agents.runtime.model_runtime.urlrequest.urlopen",
+        side_effect=fake_error,
+    ):
+        with pytest.raises(NonRetryableProviderError) as excinfo:
+            transport.post_json(
+                "https://example.com/v1",
+                headers={},
+                payload={"q": "ping"},
+                timeout=1.0,
+            )
+
+    assert "400" in str(excinfo.value)
