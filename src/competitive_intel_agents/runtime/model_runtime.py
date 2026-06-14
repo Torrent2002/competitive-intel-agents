@@ -12,6 +12,10 @@ from typing import Any, Callable, Protocol
 
 from competitive_intel_agents.models import ModelRequest, ModelResponse
 
+from ..logging import get_logger
+
+logger = get_logger(__name__)
+
 
 class ProviderError(RuntimeError):
     """Base class for provider-side request failures."""
@@ -67,11 +71,9 @@ class FakeModelProvider:
 
     @staticmethod
     def complete(request: ModelRequest) -> dict[str, Any]:
-        import sys as _sys
-        print(
-            f"[model] WARNING: FakeModelProvider used for agent={request.agent} — "
-            f"no real model configured",
-            file=_sys.stderr,
+        logger.warning(
+            "FakeModelProvider used — no real model configured",
+            extra={"agent": request.agent or "unknown"},
         )
         agent = request.agent or "unknown"
         if agent == "analyst":

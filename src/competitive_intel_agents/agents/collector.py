@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json as _json
-import sys as _sys
 from urllib.parse import urlparse
 
 from competitive_intel_agents.agents.base import BaseAgent
@@ -22,6 +21,9 @@ from competitive_intel_agents.models import (
     ToolResult,
 )
 from competitive_intel_agents.runtime.model_runtime import ModelRuntime
+from competitive_intel_agents.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class CollectorAgent(BaseAgent):
@@ -154,10 +156,15 @@ class CollectorAgent(BaseAgent):
             had_tool_errors = any(not result.ok for result in tool_results)
 
             if saved:
-                print(
-                    f"[collector] saved {len(saved)} sources, total={len(now)} "
-                    f"(target={self._target_sources})",
-                    file=_sys.stderr,
+                logger.info(
+                    "saved sources",
+                    extra={
+                        "run_id": context.run_id,
+                        "agent": "collector",
+                        "saved": len(saved),
+                        "total": len(now),
+                        "target": self._target_sources,
+                    },
                 )
 
             # More URLs pending from earlier search batches?
@@ -965,16 +972,18 @@ class CollectorAgent(BaseAgent):
         })
         resp = self._model_runtime.complete(model_req)
         if not resp.ok or not resp.parsed:
-            print(
-                f"[collector] URL selection model failed: ok={resp.ok} error={resp.error}, "
-                f"using algorithmic scoring",
-                file=_sys.stderr,
+            logger.warning(
+                "url-selection model call failed; falling back to algorithmic scoring",
+                extra={"agent": "collector", "ok": resp.ok, "error": resp.error},
             )
             return self._select_urls(results, count)
 
         indices = resp.parsed.get("selected_indices", [])
         if not isinstance(indices, list) or len(indices) < 1:
-            print("[collector] URL selection returned invalid indices, using algorithmic scoring", file=_sys.stderr)
+            logger.warning(
+                "url-selection returned invalid indices; falling back to algorithmic scoring",
+                extra={"agent": "collector"},
+            )
             return self._select_urls(results, count)
 
         selected: list[dict] = []
@@ -1073,9 +1082,13 @@ class CollectorAgent(BaseAgent):
             # Check relevance
             if self._model_runtime is not None:
                 if not self._is_relevant(context, tr.data):
-                    print(
-                        f"[collector] skipping irrelevant: {url[:80]}",
-                        file=_sys.stderr,
+                    logger.info(
+                        "skipping irrelevant url",
+                        extra={
+                            "run_id": context.run_id,
+                            "agent": "collector",
+                            "url": url[:80],
+                        },
                     )
                     continue
 
@@ -1093,9 +1106,13 @@ class CollectorAgent(BaseAgent):
             metadata = self._source_metadata(metadata, tr.data)
             if self._reject_source_for_quality(metadata):
                 self._last_quality_rejections += 1
-                print(
-                    f"[collector] skipping low-quality source: {url[:80]}",
-                    file=_sys.stderr,
+                logger.info(
+                    "skipping low-quality source",
+                    extra={
+                        "run_id": context.run_id,
+                        "agent": "collector",
+                        "url": url[:80],
+                    },
                 )
                 continue
 

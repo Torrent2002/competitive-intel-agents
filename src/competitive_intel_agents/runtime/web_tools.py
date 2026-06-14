@@ -15,7 +15,10 @@ from pathlib import Path
 from typing import Callable, Protocol
 from urllib import error as urllib_error, parse, request as urllib_request
 
+from ..logging import get_logger
 from .rate_limiter import TokenBucket
+
+logger = get_logger(__name__)
 
 
 def _looks_like_429(error_text: str) -> bool:
@@ -177,14 +180,16 @@ class DuckDuckGoSearch:
                 if self._rate_limiter is not None and _looks_like_429(str(exc)):
                     self._rate_limiter.penalize()
         if not results:
-            import sys
-            print(
-                f"[ddg] query={query[:50]!r} results=0 error={last_error}",
-                file=sys.stderr,
+            logger.warning(
+                "ddg search returned 0 results",
+                extra={"engine": "ddg", "query": query[:50], "error": last_error},
             )
             # Dump first bit of HTML to diagnose parsing failures
             try:
-                print(f"[ddg] html preview: {html_text[:300]!r}", file=sys.stderr)
+                logger.debug(
+                    "ddg html preview",
+                    extra={"engine": "ddg", "preview": html_text[:300]},
+                )
             except Exception:
                 pass
         return results
@@ -218,20 +223,20 @@ class BingSearch:
         except Exception as exc:
             if self._rate_limiter is not None and _looks_like_429(str(exc)):
                 self._rate_limiter.penalize()
-            import sys
-
-            print(
-                f"[bing] query={query[:50]!r} results=0 error={exc}",
-                file=sys.stderr,
+            logger.warning(
+                "bing search request failed",
+                extra={"engine": "bing", "query": query[:50], "error": str(exc)},
             )
             return []
         results = _parse_bing_html(html_text, limit)
         if not results:
-            import sys
-
-            print(
-                f"[bing] query={query[:50]!r} results=0 parsed_empty(len={len(html_text)})",
-                file=sys.stderr,
+            logger.warning(
+                "bing search parsed empty",
+                extra={
+                    "engine": "bing",
+                    "query": query[:50],
+                    "html_len": len(html_text),
+                },
             )
         return results
 
@@ -261,20 +266,20 @@ class BaiduSearch:
         except Exception as exc:
             if self._rate_limiter is not None and _looks_like_429(str(exc)):
                 self._rate_limiter.penalize()
-            import sys
-
-            print(
-                f"[baidu] query={query[:50]!r} results=0 error={exc}",
-                file=sys.stderr,
+            logger.warning(
+                "baidu search request failed",
+                extra={"engine": "baidu", "query": query[:50], "error": str(exc)},
             )
             return []
         results = _parse_baidu_html(html_text, limit)
         if not results:
-            import sys
-
-            print(
-                f"[baidu] query={query[:50]!r} results=0 parsed_empty(len={len(html_text)})",
-                file=sys.stderr,
+            logger.warning(
+                "baidu search parsed empty",
+                extra={
+                    "engine": "baidu",
+                    "query": query[:50],
+                    "html_len": len(html_text),
+                },
             )
         return results
 
@@ -304,20 +309,20 @@ class SogouSearch:
         except Exception as exc:
             if self._rate_limiter is not None and _looks_like_429(str(exc)):
                 self._rate_limiter.penalize()
-            import sys
-
-            print(
-                f"[sogou] query={query[:50]!r} results=0 error={exc}",
-                file=sys.stderr,
+            logger.warning(
+                "sogou search request failed",
+                extra={"engine": "sogou", "query": query[:50], "error": str(exc)},
             )
             return []
         results = _parse_sogou_html(html_text, limit)
         if not results:
-            import sys
-
-            print(
-                f"[sogou] query={query[:50]!r} results=0 parsed_empty(len={len(html_text)})",
-                file=sys.stderr,
+            logger.warning(
+                "sogou search parsed empty",
+                extra={
+                    "engine": "sogou",
+                    "query": query[:50],
+                    "html_len": len(html_text),
+                },
             )
         return results
 
@@ -410,37 +415,34 @@ class SerperSearch:
             # Serper for the rest of this run's penalty window.
             if exc.code == 429 and self._rate_limiter is not None:
                 self._rate_limiter.penalize()
-            import sys
-
-            print(
-                f"[serper] query={query[:50]!r} results=0 error={exc}",
-                file=sys.stderr,
+            logger.warning(
+                "serper request failed",
+                extra={
+                    "engine": "serper",
+                    "query": query[:50],
+                    "http_code": exc.code,
+                    "error": str(exc),
+                },
             )
             return []
         except (urllib_error.URLError, OSError, TimeoutError) as exc:
-            import sys
-
-            print(
-                f"[serper] query={query[:50]!r} results=0 error={exc}",
-                file=sys.stderr,
+            logger.warning(
+                "serper transport error",
+                extra={"engine": "serper", "query": query[:50], "error": str(exc)},
             )
             return []
         except json.JSONDecodeError as exc:
-            import sys
-
-            print(
-                f"[serper] query={query[:50]!r} results=0 invalid_json={exc}",
-                file=sys.stderr,
+            logger.warning(
+                "serper returned invalid json",
+                extra={"engine": "serper", "query": query[:50], "error": str(exc)},
             )
             return []
 
         organic = raw.get("organic") if isinstance(raw, dict) else None
         if not isinstance(organic, list):
-            import sys
-
-            print(
-                f"[serper] query={query[:50]!r} results=0 no_organic_key",
-                file=sys.stderr,
+            logger.warning(
+                "serper response missing organic key",
+                extra={"engine": "serper", "query": query[:50]},
             )
             return []
         results: list[dict] = []
@@ -476,12 +478,13 @@ class FallbackSearch:
             try:
                 results = adapter.search(query, limit=limit)
             except Exception as exc:
-                import sys
-
-                print(
-                    f"[search] adapter={adapter.__class__.__name__} "
-                    f"query={query[:50]!r} error={exc}",
-                    file=sys.stderr,
+                logger.warning(
+                    "search adapter raised",
+                    extra={
+                        "adapter": adapter.__class__.__name__,
+                        "query": query[:50],
+                        "error": str(exc),
+                    },
                 )
                 continue
             engine_name = adapter.__class__.__name__

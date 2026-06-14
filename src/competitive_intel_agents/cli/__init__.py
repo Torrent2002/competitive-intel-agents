@@ -13,6 +13,7 @@ from competitive_intel_agents.dashboard import (
 )
 from competitive_intel_agents.harness import InMemoryCheckpointStore, RuntimeHarness
 from competitive_intel_agents.journal import InMemoryJournalStore, JournalStore
+from competitive_intel_agents.logging import configure_logging
 from competitive_intel_agents.models import CompetitiveIntelRequest
 from competitive_intel_agents.orchestrator import Orchestrator, load_agent_profiles
 from competitive_intel_agents.runtime import (
@@ -81,6 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_logging()
     parser = build_parser()
     args = parser.parse_args(argv)
 
