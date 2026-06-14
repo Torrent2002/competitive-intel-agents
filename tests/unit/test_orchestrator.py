@@ -468,3 +468,112 @@ def test_orchestrator_keeps_rework_failed_when_no_report_was_produced() -> None:
     assert result.caveats == []
     # The blocker stays on review_feedback for diagnostics.
     assert result.review_feedback and result.review_feedback[0].issue == "missing_section"
+
+
+# ── Global wall-clock timeout (Module 33) ──────────────────────
+
+
+def test_orchestrator_returns_aborted_when_timeout_before_any_report() -> None:
+    """When the deadline expires before any report is produced, the run
+    must abort cleanly rather than continue burning budget."""
+
+    # time_provider yields strictly increasing values: t=0 at __init__,
+    # t=10000 at the first deadline check inside run(). Anything past
+    # the deadline (max_wall_time=1.0 → deadline=1.0) returns the
+    # timeout result on the very first agent boundary.
+    ticks = iter([0.0, 10_000.0, 10_001.0, 10_002.0])
+
+    class NoOpHarness:
+        def run_agent(self, context, agent):
+            return AgentResult(agent=agent.name, decision="stop", rounds=1)
+
+    orchestrator = Orchestrator(
+        harness=NoOpHarness(),
+        max_wall_time=1.0,
+        time_provider=lambda: next(ticks),
+        run_id_factory=lambda: "run_timeout_no_report",
+    )
+
+    result = orchestrator.run(make_request())
+
+    assert result.status == "aborted"
+    assert result.error == "global_timeout"
+    assert result.report_id is None
+    assert result.caveats == []
+
+
+def test_orchestrator_returns_caveats_when_timeout_after_report_exists() -> None:
+    """If a report has already been written when the deadline trips, the
+    run should ship as approved_with_caveats so the user keeps the
+    partial work plus an explicit timeout caveat."""
+
+    artifacts = InMemoryArtifactStore()
+
+    class WriterRecordingHarness:
+        """Persists a report on the writer round, then lets time march
+        past the deadline before the next agent boundary."""
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def run_agent(self, context, agent):
+            self.calls.append(agent.name)
+            if agent.name == "writer":
+                report = ReportDraft(
+                    id=f"report_timeout_{context.run_id}_001",
+                    run_id=context.run_id,
+                    sections={"Summary": "Partial deliverable."},
+                    claim_ids=[],
+                    source_ids=[],
+                )
+                artifacts.save_report(report)
+                return AgentResult(
+                    agent="writer",
+                    decision="stop",
+                    rounds=1,
+                    output_artifact_ids=[report.id],
+                )
+            return AgentResult(agent=agent.name, decision="stop", rounds=1)
+
+    # First two ticks: __init__ (t=0) and first deadline check at the
+    # collector boundary (t=0.5, deadline=10.0 not yet reached).
+    # Then time leaps past the deadline before the reviewer boundary.
+    ticks = iter([0.0, 0.5, 0.6, 0.7, 1000.0, 1000.1])
+    harness = WriterRecordingHarness()
+    orchestrator = Orchestrator(
+        artifacts=artifacts,
+        harness=harness,
+        max_wall_time=10.0,
+        time_provider=lambda: next(ticks),
+        run_id_factory=lambda: "run_timeout_with_report",
+    )
+
+    result = orchestrator.run(make_request())
+
+    assert result.status == "approved_with_caveats"
+    assert result.error == "global_timeout"
+    assert result.report_id is not None
+    assert result.report_id.startswith("report_timeout_")
+    assert result.review_feedback == []
+    assert len(result.caveats) == 1
+    assert result.caveats[0].issue == "format_violation"
+    assert "wall-clock budget" in result.caveats[0].message
+    # Reviewer never ran because the deadline tripped between writer and reviewer.
+    assert "reviewer" not in harness.calls
+
+
+def test_orchestrator_no_timeout_when_max_wall_time_is_none() -> None:
+    """Passing ``max_wall_time=None`` disables the deadline entirely —
+    used by every existing harness-driven test that doesn't model time."""
+
+    orchestrator = Orchestrator(
+        max_wall_time=None,
+        run_id_factory=lambda: "run_no_deadline",
+    )
+
+    result = orchestrator.run(make_single_company_request())
+
+    # Same outcome as the canonical end-to-end test — the deadline
+    # logic must not change behavior when disabled.
+    assert result.status == "approved"
+    assert result.error is None

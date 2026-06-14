@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
@@ -779,6 +780,10 @@ def _make_web_orchestrator(
     model_runtime = None
     if real_model:
         model_runtime = ModelRuntime(provider=ConfiguredProviderFactory().create())
+    # Read the wall-clock budget from env so operators can tune without
+    # editing code. Empty / unparseable / None → fall back to the
+    # Orchestrator default (600s).
+    max_wall_time = _read_max_wall_time_from_env()
     if not real_web:
         return Orchestrator(
             artifacts=workspace.artifacts,
@@ -787,6 +792,7 @@ def _make_web_orchestrator(
             model_runtime=model_runtime,
             enable_rework=True,
             run_id_factory=(lambda: run_id) if run_id else None,
+            max_wall_time=max_wall_time,
         )
 
     tools = ToolRuntime()
@@ -809,7 +815,27 @@ def _make_web_orchestrator(
         model_runtime=model_runtime,
         enable_rework=True,
         run_id_factory=(lambda: run_id) if run_id else None,
+        max_wall_time=max_wall_time,
     )
+
+
+def _read_max_wall_time_from_env() -> float | None:
+    """Parse ``CIA_MAX_RUN_SECONDS`` env var into a deadline override.
+
+    Returns ``None`` when unset or unparseable so the Orchestrator's
+    default (600s) wins. ``CIA_MAX_RUN_SECONDS=0`` disables the
+    deadline entirely (useful for long debug sessions).
+    """
+    raw = os.environ.get("CIA_MAX_RUN_SECONDS", "").strip()
+    if not raw:
+        return 600.0
+    try:
+        value = float(raw)
+    except ValueError:
+        return 600.0
+    if value <= 0:
+        return None
+    return value
 
 
 def _first(form: dict[str, list[str]], key: str) -> str:
