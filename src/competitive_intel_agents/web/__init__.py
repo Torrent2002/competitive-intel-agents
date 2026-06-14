@@ -28,6 +28,7 @@ from competitive_intel_agents.runtime import (
     make_default_search_adapter,
 )
 from competitive_intel_agents.harness import InMemoryCheckpointStore, RuntimeHarness
+from competitive_intel_agents.web.api import handle_api_request, is_api_path
 
 if TYPE_CHECKING:
     from competitive_intel_agents.workspace import LocalWorkspace
@@ -862,6 +863,9 @@ class WebDashboardHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        if is_api_path(parsed.path):
+            handle_api_request(self, "GET", self.workspace)
+            return
         if parsed.path == "/":
             html = render_run_list(self.workspace)
             self._respond_html(200, html)
@@ -890,6 +894,9 @@ class WebDashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if is_api_path(parsed.path):
+            handle_api_request(self, "POST", self.workspace)
+            return
         if parsed.path != "/runs":
             self.send_response(404)
             self.end_headers()
