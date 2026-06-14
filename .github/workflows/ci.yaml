@@ -40,10 +40,15 @@ jobs:
           pip install -e .
           pip install pytest
 
-      - name: Run pytest (excluding preexisting_fail)
+      - name: Run pytest
         env:
           # Make sure logs in CI are JSON so failures are parseable from
           # the action log, matching production formatting.
           CIA_LOG_FORMAT: json
         run: |
-          pytest tests/unit -q -m "not preexisting_fail"
+          # The 12 pre-existing failures on main are auto-marked
+          # xfail(strict=True) by tests/conftest.py — they show up as
+          # XFAIL on the report and do not fail the build. If any of
+          # them ever start passing, pytest exits non-zero and the
+          # owner is forced to remove the entry from the list.
+          pytest tests/unit -q

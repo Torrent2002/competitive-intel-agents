@@ -411,3 +411,112 @@ def test_unknown_api_route_returns_404(server):
     assert response.status == 404
     parsed = json.loads(payload)
     assert parsed["error"]["code"] == "not_found"
+
+
+# ---------------------------------------------------------------------------
+# Security / robustness — added per PR #24 review (B1, B2, M1, M3)
+# ---------------------------------------------------------------------------
+
+
+def test_whitespace_only_token_fails_closed(server, monkeypatch):
+    """B2: a misconfigured ``CIA_API_TOKEN`` (only whitespace) must NOT
+    silently disable auth. The whole point of setting the env var is to
+    gate access; treating ``"   "`` as ``unset`` would be a configuration
+    trapdoor."""
+    httpd, _ = server
+    monkeypatch.setenv("CIA_API_TOKEN", "   ")
+
+    response, payload = _request(httpd, "GET", "/api/runs")
+    assert response.status == 401
+    parsed = json.loads(payload)
+    assert parsed["error"]["code"] == "unauthorized"
+
+
+def test_internal_error_does_not_echo_exception_string(server, monkeypatch):
+    """M1: a 500 response must not expose the raw exception message to
+    the caller. SQLite errors, provider URLs and similar internals can
+    end up there. Only a correlation id should leak; details go to the
+    structured logger so operators can correlate offline."""
+    httpd, workspace = server
+
+    def _boom():
+        raise RuntimeError("INTERNAL_PATH=/var/lib/secret/db.sqlite TOKEN=xyz")
+
+    monkeypatch.setattr(workspace, "list_run_results", _boom, raising=False)
+
+    response, payload = _request(httpd, "GET", "/api/runs")
+    assert response.status == 500
+    parsed = json.loads(payload)
+    assert parsed["error"]["code"] == "internal"
+    assert "/var/lib/secret/db.sqlite" not in parsed["error"]["message"]
+    assert "TOKEN=xyz" not in parsed["error"]["message"]
+    assert "correlation_id=" in parsed["error"]["message"]
+
+
+def test_oversized_request_body_rejected_with_413(server):
+    """M3: an unbounded ``Content-Length`` is a trivial DoS / OOM vector.
+    The API must refuse anything over the 1 MiB ceiling before reading
+    a single byte off the wire."""
+    httpd, _ = server
+    conn = HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+    conn.request(
+        "POST",
+        "/api/runs",
+        body=b"",
+        # 10 MiB declared in the header — server should refuse without
+        # reading the body.
+        headers={
+            "Content-Type": "application/json",
+            "Content-Length": str(10 * 1024 * 1024),
+        },
+    )
+    response = conn.getresponse()
+    payload = response.read()
+    assert response.status == 413
+    parsed = json.loads(payload)
+    assert parsed["error"]["code"] == "payload_too_large"
+
+
+def test_malformed_content_length_returns_400(server):
+    """M3: a non-numeric ``Content-Length`` must produce a clean 400,
+    not crash through the bare exception net."""
+    httpd, _ = server
+    conn = HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+    # Bypass HTTPConnection's automatic Content-Length to send garbage.
+    conn.putrequest("POST", "/api/runs", skip_host=False)
+    conn.putheader("Content-Type", "application/json")
+    conn.putheader("Content-Length", "not-a-number")
+    conn.endheaders()
+    response = conn.getresponse()
+    payload = response.read()
+    assert response.status == 400
+    parsed = json.loads(payload)
+    assert parsed["error"]["code"] == "bad_request"
+    assert "Content-Length" in parsed["error"]["message"]
+
+
+def test_token_compare_is_constant_time(monkeypatch):
+    """B1: the auth check must use ``secrets.compare_digest`` so the
+    side-channel on shared-prefix length is closed. We verify the
+    code path actually goes through ``compare_digest`` rather than
+    plain ``==``."""
+    import competitive_intel_agents.web.api as api_module
+
+    monkeypatch.setenv("CIA_API_TOKEN", "abc123")
+
+    calls = []
+    real = api_module.secrets.compare_digest
+
+    def _spy(a, b):
+        calls.append((a, b))
+        return real(a, b)
+
+    monkeypatch.setattr(api_module.secrets, "compare_digest", _spy)
+
+    class _FakeHandler:
+        path = "/api/runs"
+        headers = {"Authorization": "Bearer wrong"}
+
+    assert api_module._check_auth(_FakeHandler()) is False
+    assert calls, "compare_digest should be the comparison primitive"
+    assert calls[0] == (b"wrong", b"abc123")

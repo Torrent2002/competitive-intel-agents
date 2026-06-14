@@ -92,3 +92,98 @@ def test_health_does_not_require_auth_when_token_set(server, monkeypatch):
 
     response, _ = _get(httpd, "/ready")
     assert response.status == 200
+
+
+def test_sigterm_handler_does_not_deadlock(tmp_path):
+    """Regression test for PR #24 review M2.
+
+    ``server.shutdown()`` blocks until ``serve_forever()`` returns. The
+    earlier implementation called ``shutdown`` from inside the signal
+    handler, which runs on the main thread — the same thread parked in
+    ``serve_forever``. That deadlocks until the kernel SIGKILLs the
+    container ``terminationGracePeriodSeconds`` later, defeating the
+    whole \"graceful shutdown\" goal.
+
+    This test forks a child process running ``start_web_server``, waits
+    for the listener to come up, sends SIGTERM, and asserts the child
+    exits cleanly within a few seconds. If the deadlock returns the test
+    times out and ``proc.terminate``/``kill`` paths force a hard fail.
+    """
+    import signal as _signal
+    import socket
+    import subprocess
+    import sys
+    import textwrap
+    import time
+
+    workspace_path = tmp_path / "ws"
+
+    # Pick a free port up front so the child does not need to negotiate.
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+
+    child_script = textwrap.dedent(
+        f"""
+        import sys
+        sys.path.insert(0, {repr(str(tmp_path.parent.parent / 'src'))})
+        from competitive_intel_agents.web import start_web_server
+        from competitive_intel_agents.workspace import LocalWorkspace
+        ws = LocalWorkspace({repr(str(workspace_path))})
+        start_web_server(ws, host="127.0.0.1", port={port})
+        """
+    )
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", child_script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    try:
+        # Wait for the listener — up to 10s so a slow CI runner doesn't
+        # flake. We poll the actual TCP port, not /health, because
+        # /health requires the server to be fully serving.
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            with socket.socket() as probe:
+                probe.settimeout(0.2)
+                try:
+                    probe.connect(("127.0.0.1", port))
+                except OSError:
+                    time.sleep(0.05)
+                    continue
+                else:
+                    break
+        else:
+            proc.kill()
+            stdout, stderr = proc.communicate(timeout=2)
+            raise AssertionError(
+                f"server did not start within 10s\nstdout={stdout!r}\nstderr={stderr!r}"
+            )
+
+        # Give the signal handlers a moment to register before sending.
+        time.sleep(0.1)
+        proc.send_signal(_signal.SIGTERM)
+
+        # The fix should let the process exit within ~1s; we allow 8s
+        # for slow CI. Anything longer than that and the deadlock is
+        # back.
+        try:
+            return_code = proc.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, stderr = proc.communicate(timeout=2)
+            raise AssertionError(
+                "SIGTERM did not terminate the server within 8s — "
+                "shutdown() likely deadlocked on the main thread.\n"
+                f"stdout={stdout!r}\nstderr={stderr!r}"
+            )
+
+        # SIGTERM-induced clean shutdown returns 0 from this code path.
+        assert return_code == 0, f"non-zero exit: {return_code}"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=2)

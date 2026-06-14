@@ -126,13 +126,22 @@ vs `if not body.get("company"): return _write_error(...)` 风格 —— exceptio
 
 ```python
 def _check_auth(handler):
-    expected = os.environ.get("CIA_API_TOKEN", "").strip()
+    raw = os.environ.get("CIA_API_TOKEN")
+    if raw is None:
+        return True              # PoC 模式：env 未设 = 完全开放
+    expected = raw.strip()
     if not expected:
-        return True              # PoC 模式：env 没设 = 完全开放
+        # 设了但 strip 后为空（"   "）→ fail closed + log loud
+        logger.error("CIA_API_TOKEN is set but empty after stripping ...")
+        return False
     header = handler.headers.get("Authorization", "") or ""
     if not header.lower().startswith("bearer "):
         return False
-    return header[len("bearer "):].strip() == expected
+    presented = header[len("bearer "):].strip()
+    return secrets.compare_digest(
+        presented.encode("utf-8"),
+        expected.encode("utf-8"),
+    )
 ```
 
 设计要点：
@@ -141,13 +150,17 @@ def _check_auth(handler):
    当 ops 把容器跑到外网时，docker-compose `env_file` 设个 token，
    立刻进入「生产」模式，**镜像不变**。
 
-2. **scheme 不区分大小写**：`bearer foo` 和 `Bearer foo` 都接受，
+2. **「设了但 strip 后为空 = 失败关闭」**：操作员误填 `CIA_API_TOKEN="   "`
+   时不能静默关闭鉴权。安全失败必须 loud（写 error log）+ closed（拒绝
+   所有请求），不能 silent + open。
+
+3. **scheme 不区分大小写**：`bearer foo` 和 `Bearer foo` 都接受，
    RFC 7235 §2.1 强制要求。
 
-3. **当前用 `==` 直接比**：单进程 env、单 token，无 timing attack 表面。
-   上 KMS / DB-backed token 时换 `secrets.compare_digest`。
+4. **`secrets.compare_digest` 比较**：闭住 timing side-channel，避免
+   攻击者基于「比较 N 字节用了多久」逐字节猜 token。
 
-4. **GET 也鉴权**：没有「公开读 + 鉴权写」的概念。claims / sources
+5. **GET 也鉴权**：没有「公开读 + 鉴权写」的概念。claims / sources
    是机密分析结果，不能让 GET 漏出去。
 
 ### 4. 异步 run 创建
@@ -194,7 +207,42 @@ def _handle_post_runs(handler, workspace):
   }
   ```
 
-### 5. 内容协商：JSON vs Markdown
+### 5. Body 大小上限 + Content-Length 验证
+
+```python
+_MAX_REQUEST_BODY_BYTES = 1 * 1024 * 1024  # 1 MiB
+
+def _read_json_body(handler):
+    raw_length = handler.headers.get("Content-Length", "0") or "0"
+    try:
+        length = int(raw_length)
+    except (TypeError, ValueError) as exc:
+        raise _ApiError(400, "bad_request", "invalid Content-Length header") from exc
+    if length < 0:
+        raise _ApiError(400, "bad_request", "Content-Length must be non-negative")
+    if length > _MAX_REQUEST_BODY_BYTES:
+        raise _ApiError(413, "payload_too_large", ...)
+    if length == 0:
+        return {}
+    raw = handler.rfile.read(length)
+    ...
+```
+
+无上限 + 不 try 是经典 DoS 入口：客户端声明 `Content-Length:
+9999999999`，server `rfile.read(length)` 会试图分配 / 阻塞读那么多字节。
+ON 公网或反代后面就是单连接搞死整个 worker。
+
+设计要点：
+- **试解析 + 类型保护**：`int("not-a-number")` 抛 ValueError → 翻译成
+  400，不让裸异常钻到顶层 catch（M1 修后那里也只回 correlation_id）
+- **拒绝负数**：`Content-Length: -1` 在某些 stdlib 版本会被当成「读到
+  EOF」无限读
+- **413 而不是 400**：HTTP 标准状态码区分语义（payload too large vs
+  bad request），客户端可以靠 status 分支
+- **1 MiB 上限**：当前 API 最大 body 是 `competitors` + `questions`
+  数组 + 自由文本，几 KB 顶天；1 MiB 留宽松上限给未来加字段
+
+### 6. 内容协商：JSON vs Markdown
 
 ```python
 def _write_report(handler, workspace, run_id):
@@ -202,18 +250,48 @@ def _write_report(handler, workspace, run_id):
     accept = handler.headers.get("Accept", "") or ""
     if "text/markdown" in accept and report is not None:
         body = _render_report_markdown(report).encode("utf-8")
-        # 直接写 markdown 响应
         return
     # 默认 JSON 响应
 ```
 
 不做完整 q-value 解析（`Accept: text/markdown;q=0.9, application/json;q=0.8`）：
 
-- 99% 客户端不发 q-value，发的也基本就是单一类型
+- 99% 客户端不发 q-value
 - 引入 q-value 解析需要 ~50 行代码 + 测试，复杂度 > 收益
 - 业务只有两种格式，substring `in` 够用
 
-## 设计取舍
+### 7. 顶层 catch 不回显内部异常
+
+```python
+try:
+    if method == "POST" and path == "/api/runs":
+        _handle_post_runs(...)
+        return
+    ...
+except _ApiError as exc:
+    _write_error(handler, exc.status, exc.code, exc.message)
+except Exception:
+    correlation_id = secrets.token_hex(8)
+    logger.exception(
+        "api handler crashed",
+        extra={"path": path, "method": method, "correlation_id": correlation_id},
+    )
+    _write_error(
+        handler, 500, "internal",
+        f"internal server error (correlation_id={correlation_id})",
+    )
+```
+
+为什么不直接 `str(exc)` 回客户端：
+
+- SQLite 异常带 `/var/lib/.../db.sqlite` 完整路径
+- urllib HTTPError 可能带 `https://api.../v1/messages?key=sk-...` 这种
+  含 token 的 URL
+- 自定义 provider 的 RuntimeError 可能 dump 整个请求 payload
+
+正确做法：**外面看不到细节，里面有完整 trace**。`correlation_id`
+让 ops 在 log aggregator 里 grep 一把锁定具体异常。这是基础设施层
+信息隔离的标准模式（Stripe / AWS / GCP API 都是这样）。
 
 ### 为什么不加 `/api/v1/` 版本前缀
 

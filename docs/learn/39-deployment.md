@@ -116,14 +116,17 @@ def do_GET(self):
 
 ```python
 def start_web_server(workspace, host="127.0.0.1", port=8080):
-    import signal
+    import signal, threading
     configure_logging()
     WebDashboardHandler.workspace = workspace
     server = ThreadingHTTPServer((host, port), WebDashboardHandler)
 
     def _shutdown(signum, _frame):
         logger.info("shutting down on signal", extra={"signum": signum})
-        server.shutdown()
+        # 把 shutdown() 派发到独立线程，让 signal handler 立刻返回。
+        # 否则会死锁：signal 投递到主线程 → 主线程正卡在 serve_forever()
+        # → shutdown() 等 serve_forever 返回 → 永远等不到。
+        threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
@@ -136,9 +139,16 @@ def start_web_server(workspace, host="127.0.0.1", port=8080):
 
 要点：
 - `signal.signal` 必须在主线程注册，且只能注册一次
-- `server.shutdown()` 是 thread-safe，从 signal handler 调安全
+- **`server.shutdown()` 必须从独立线程调** —— 这是被 review 抓出来的
+  bug。直觉以为 `signal handler` 跑在「另一个上下文」可以直接调，但
+  Python signal 总是投递到主线程，主线程同时也是 `serve_forever()`
+  阻塞的线程，自己等自己 → 死锁，K8s `terminationGracePeriodSeconds`
+  到点 SIGKILL。修法：signal handler 里起 thread 调 `shutdown()`
 - `try/finally + server_close` 释放监听 socket，下次启动不会 EADDRINUSE
 - **不等后台 daemon thread**：那是有意识选择，详见模块文档
+
+回归测试 `test_sigterm_handler_does_not_deadlock` 真的 fork 子进程、
+发 SIGTERM、断言 < 8s 退出。修前测试失败（8s 超时），修后 < 1s 退出。
 
 ### 4. conftest.py 自动 mark
 

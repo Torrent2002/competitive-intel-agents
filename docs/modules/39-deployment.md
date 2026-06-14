@@ -114,7 +114,8 @@ if parsed.path == "/ready":
 ```python
 def _shutdown(signum, _frame):
     logger.info("shutting down on signal", extra={"signum": signum})
-    server.shutdown()         # 让 serve_forever 返回
+    # 把 server.shutdown() 派发到独立线程，让 signal handler 立刻返回
+    threading.Thread(target=server.shutdown, name="web-shutdown", daemon=True).start()
 
 signal.signal(signal.SIGTERM, _shutdown)
 signal.signal(signal.SIGINT, _shutdown)
@@ -125,16 +126,14 @@ finally:
     server.server_close()      # 释放监听 socket
 ```
 
-`server.shutdown()` 阻塞等 `serve_forever()` 返回。从 signal handler
-调它是安全的，因为 `serve_forever` 在主线程运行；`shutdown` 在 signal
-handler 线程调时它在另一个执行上下文，不会自我死锁。
-
-为什么不等后台 daemon thread：
-- 后台 thread 跑的是 collector → analyst → writer → reviewer，可能
-  几十秒到几分钟
-- Kubernetes 默认 `terminationGracePeriodSeconds=30`，等不及
-- daemon thread 进程退出时被强杀，写过的 round 已经在 journal.sqlite
-  里持久化 → 下次同 run_id 重启可以重放，不丢历史
+要点：
+- **`server.shutdown()` 必须从独立线程调**：Python signal 投递到主
+  线程，`serve_forever()` 也卡在主线程。`shutdown` 等 `serve_forever`
+  返回，从同一线程调就是「自己等自己」死锁，直到 K8s SIGKILL
+- `try/finally + server_close` 释放监听 socket，下次启动不会 EADDRINUSE
+- **不等后台 daemon thread**：那是有意识选择，daemon thread 进程退出
+  时被强杀，写过的 round 已经在 journal.sqlite 里持久化 → 下次同
+  run_id 重启可以重放，不丢历史
 - 真要 at-least-once：`run_id` 是幂等键，重启后客户端重发同 run_id
   即可
 
@@ -149,17 +148,25 @@ _PREEXISTING_FAILURES = frozenset({
 def pytest_collection_modifyitems(items):
     for item in items:
         if (item.path.name, item.name) in _PREEXISTING_FAILURES:
+            item.add_marker(pytest.mark.xfail(
+                strict=True,
+                reason="preexisting failure on main; remove once fixed",
+            ))
             item.add_marker(pytest.mark.preexisting_fail)
 ```
 
-CI 命令：`pytest tests/unit -q -m "not preexisting_fail"` → 永远绿。
+CI: `pytest tests/unit -q` → **0 fail, 12 xfailed**。
 
-为什么不直接 `xfail` 它们：
-- `xfail` 表示「预期失败」，绿色 PR 上看不见这个状态，但每次跑还是
-  会执行测试 + 触发副作用（sleep、subprocess 等）
-- 我们的 12 个 fail 是「未来要修，现在不在本次 scope」，应该被跳过
-  不被执行
-- 等老测试修好后，从 conftest list 删掉条目就自然进 CI
+为什么 `xfail(strict=True)` 而不是 `mark + -m "not preexisting_fail"`：
+
+- skip filter 是单向棘轮：测试修好后仍被跳过，没人发现已经修了 → 列表
+  只增不减
+- `xfail(strict=True)`：测试**仍执行**，仍失败时 `XFAIL` 不打挂 CI；
+  但**修好后**变 `XPASSED` → CI 红 → 强制摘 mark
+- 这样列表永远「单向收缩」，绝不会扩
+
+经典 review-driven 改动：第一版用 skip filter，subagent review 抓
+出「这是单向棘轮」，立刻改 xfail strict + 强制收缩规则。
 
 ### docker-compose.yaml `env_file: required: false`
 

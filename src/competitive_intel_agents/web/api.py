@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 from http.server import BaseHTTPRequestHandler
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, unquote, urlparse
@@ -94,15 +95,27 @@ def handle_api_request(
         _write_error(handler, 404, "not_found", f"unknown api route: {path}")
     except _ApiError as exc:
         _write_error(handler, exc.status, exc.code, exc.message)
-    except Exception as exc:
+    except Exception:
         # Last-resort safety net so a buggy handler never crashes the
-        # whole server thread. The exception is also logged so operators
-        # can investigate offline.
+        # whole server thread. The full exception is logged with a
+        # correlation id; the wire response carries only that id and a
+        # generic message so we don't leak SQLite paths, provider URLs
+        # with tokens, or other internals to remote callers.
+        correlation_id = secrets.token_hex(8)
         logger.exception(
             "api handler crashed",
-            extra={"path": path, "method": method},
+            extra={
+                "path": path,
+                "method": method,
+                "correlation_id": correlation_id,
+            },
         )
-        _write_error(handler, 500, "internal", str(exc))
+        _write_error(
+            handler,
+            500,
+            "internal",
+            f"internal server error (correlation_id={correlation_id})",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -332,19 +345,66 @@ class _ApiError(Exception):
 
 
 def _check_auth(handler: BaseHTTPRequestHandler) -> bool:
-    expected = os.environ.get("CIA_API_TOKEN", "").strip()
+    """Validate the Bearer token in ``Authorization`` against ``CIA_API_TOKEN``.
+
+    Three states:
+    - env var unset → auth disabled (local PoC mode)
+    - env var set to a real value → require ``Authorization: Bearer <token>``
+    - env var set but stripping leaves an empty string (e.g. ``"   "`` from
+      a fat-fingered ``.env``) → fail closed and log loudly. Silently
+      disabling auth on a misconfiguration is the worst possible outcome.
+
+    Token comparison uses ``secrets.compare_digest`` so the side-channel
+    on length / shared-prefix is closed. The header is split on the
+    case-insensitive ``Bearer`` scheme per RFC 7235 §2.1.
+    """
+    raw = os.environ.get("CIA_API_TOKEN")
+    if raw is None:
+        return True  # auth disabled — env var truly unset
+    expected = raw.strip()
     if not expected:
-        return True  # auth disabled — local PoC mode
+        # The operator set the env var but its content is empty after
+        # stripping. Refuse rather than silently open the API up.
+        logger.error(
+            "CIA_API_TOKEN is set but empty after stripping whitespace; "
+            "rejecting all /api/ requests until configured correctly",
+        )
+        return False
     header = handler.headers.get("Authorization", "") or ""
     if not header.lower().startswith("bearer "):
         return False
     presented = header[len("bearer ") :].strip()
-    return presented == expected
+    # ``secrets.compare_digest`` requires equal-length bytes-or-str inputs;
+    # encoding to bytes makes the contract explicit and avoids the
+    # cpython unicode-equal fast path.
+    return secrets.compare_digest(
+        presented.encode("utf-8"),
+        expected.encode("utf-8"),
+    )
+
+
+_MAX_REQUEST_BODY_BYTES = 1 * 1024 * 1024  # 1 MiB
 
 
 def _read_json_body(handler: BaseHTTPRequestHandler) -> Any:
-    length = int(handler.headers.get("Content-Length", "0") or "0")
-    if length <= 0:
+    raw_length = handler.headers.get("Content-Length", "0") or "0"
+    try:
+        length = int(raw_length)
+    except (TypeError, ValueError) as exc:
+        raise _ApiError(
+            400, "bad_request", "invalid Content-Length header"
+        ) from exc
+    if length < 0:
+        raise _ApiError(400, "bad_request", "Content-Length must be non-negative")
+    if length > _MAX_REQUEST_BODY_BYTES:
+        # 413 keeps a malicious or buggy client from instructing us to
+        # allocate / read an unbounded chunk before we even look at it.
+        raise _ApiError(
+            413,
+            "payload_too_large",
+            f"request body exceeds {_MAX_REQUEST_BODY_BYTES} byte limit",
+        )
+    if length == 0:
         return {}
     raw = handler.rfile.read(length)
     try:

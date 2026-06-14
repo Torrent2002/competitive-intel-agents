@@ -917,7 +917,18 @@ class WebDashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"Not found")
             return
-        length = int(self.headers.get("Content-Length", "0"))
+        # Bound Content-Length so a malformed or hostile client cannot
+        # instruct us to allocate / read an unbounded chunk. Form posts
+        # for this dashboard are at most a few hundred bytes; 64 KiB is
+        # a generous ceiling that still slams the door on abuse.
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+        except (TypeError, ValueError):
+            self._respond_html(400, _render_error("invalid Content-Length header"))
+            return
+        if length < 0 or length > 64 * 1024:
+            self._respond_html(400, _render_error("request body too large or invalid"))
+            return
         body = self.rfile.read(length).decode("utf-8", errors="replace")
         form = parse_qs(body)
         try:
@@ -994,26 +1005,37 @@ def start_web_server(
     daemon threads (started by ``start_run_from_form``) are torn down by
     process exit — we intentionally do not block on them so a stuck run
     cannot prevent shutdown.
+
+    The signal handler dispatches ``server.shutdown()`` onto a separate
+    thread because ``shutdown`` blocks until ``serve_forever`` returns.
+    Python signals are delivered on the main thread, which is the same
+    thread blocked inside ``serve_forever``: calling ``shutdown`` there
+    would deadlock until the kernel finally SIGKILLs the container.
     """
     import signal
+    import threading
 
-    from competitive_intel_agents.logging import configure_logging
+    from competitive_intel_agents.logging import configure_logging, get_logger
 
     configure_logging()
     WebDashboardHandler.workspace = workspace
     server = ThreadingHTTPServer((host, port), WebDashboardHandler)
 
-    _logger = __import__("competitive_intel_agents.logging", fromlist=["get_logger"]).get_logger(__name__)
+    _logger = get_logger(__name__)
 
     def _shutdown(signum, _frame):
         _logger.info(
             "shutting down on signal",
             extra={"signum": signum},
         )
-        # ``shutdown`` blocks until ``serve_forever`` returns; calling
-        # it from a signal handler is safe because the threading server
-        # runs in another thread once we are inside ``serve_forever``.
-        server.shutdown()
+        # Spawn a worker so the signal handler returns immediately and
+        # ``serve_forever`` (running on the main thread) can observe the
+        # shutdown flag set by ``server.shutdown``.
+        threading.Thread(
+            target=server.shutdown,
+            name="web-shutdown",
+            daemon=True,
+        ).start()
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)

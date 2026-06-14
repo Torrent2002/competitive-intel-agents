@@ -1,15 +1,23 @@
 """Project-wide pytest configuration.
 
-Registers a ``preexisting_fail`` marker and auto-applies it to the test
-functions that were already failing on ``main`` before the deployment
-work in [[39-deployment]] introduced a CI workflow. CI runs with
-``-m "not preexisting_fail"`` so the green-ness of the suite is
-preserved without rewriting these older tests in the same change.
+Registers a ``preexisting_fail`` marker and auto-applies it as a
+``strict=True`` xfail to the test functions that were already failing
+on ``main`` before the deployment work in [[39-deployment]] introduced
+a CI workflow.
 
-Each entry below is a pre-existing failure investigated when capturing
-this baseline (see ``docs/learn/39-deployment.md`` for the rationale and
-the follow-up issue tracker reference). New regressions MUST NOT be
-added to this list — fix them at the source instead.
+``xfail(strict=True)`` was chosen over a plain ``-m "not preexisting_fail"``
+skip filter so the list cannot ratchet against us:
+
+- A test that stays failing → ``XFAIL``, CI green.
+- A test that *starts* passing (e.g. someone fixes the underlying bug
+  in an unrelated PR) → ``XPASSED`` and pytest exits non-zero. That
+  forces whoever fixed it to remove the entry from the list, instead
+  of the fix going silently uncredited.
+- A genuinely new regression in a *different* test → ordinary failure,
+  CI red, business as usual.
+
+New regressions MUST NOT be added to this list — fix them at the source
+instead. The list is allowed to shrink, never grow.
 """
 
 from __future__ import annotations
@@ -42,7 +50,7 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
         "preexisting_fail: test was already failing on main before the CI "
-        "workflow landed; CI skips these via -m 'not preexisting_fail'",
+        "workflow landed; auto-marked as xfail(strict=True)",
     )
 
 
@@ -50,4 +58,13 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     for item in items:
         module_basename = item.path.name
         if (module_basename, item.name) in _PREEXISTING_FAILURES:
+            item.add_marker(
+                pytest.mark.xfail(
+                    strict=True,
+                    reason=(
+                        "preexisting failure on main; remove from "
+                        "tests/conftest._PREEXISTING_FAILURES once fixed"
+                    ),
+                )
+            )
             item.add_marker(pytest.mark.preexisting_fail)

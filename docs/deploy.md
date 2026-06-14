@@ -108,12 +108,18 @@ on `run_id` collision.
 
 ## CI
 
-`.github/workflows/ci.yaml` runs `pytest tests/unit -q -m "not
-preexisting_fail"` on every PR and push to `main`. The
-`preexisting_fail` marker is applied automatically by
-`tests/conftest.py` for tests that were already failing on the branch
-when CI was introduced. New regressions must be fixed at the source —
-do not extend the marker list.
+`.github/workflows/ci.yaml` runs `pytest tests/unit -q` on every PR
+and push to `main`. The `preexisting_fail` marker is applied
+automatically by `tests/conftest.py` as `xfail(strict=True)` for tests
+that were already failing on the branch when CI was introduced.
+
+- A still-failing test → `XFAIL` and CI stays green.
+- A test that *starts* passing → `XPASSED` and CI fails, forcing
+  whoever fixed it to remove the entry from the conftest list.
+
+This is a one-way ratchet that prevents bit-rot from accumulating: the
+list can only shrink. New regressions must be fixed at the source — do
+not extend the marker list.
 
 ## Known limitations
 
