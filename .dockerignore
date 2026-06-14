@@ -1,0 +1,41 @@
+# Files NOT shipped to the build context. Every entry here is a layer-
+# cache or image-size win, except ``.git`` which also keeps history out
+# of public images.
+
+# Version control
+.git
+.gitignore
+
+# Python build / cache
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+build
+dist
+.venv
+venv
+
+# Editor / IDE
+.vscode
+.idea
+
+# Project-specific
+.competitive-intel
+.claude
+config/model.json
+.env
+.env.*
+
+# Docs and tests are not needed at runtime; CI runs tests against the
+# checkout, not the image.
+docs
+tests
+
+# Misc
+*.log
+*.swp
+.DS_Store

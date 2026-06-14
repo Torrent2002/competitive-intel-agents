@@ -863,6 +863,21 @@ class WebDashboardHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/health":
+            # Liveness: this process accepted the connection and ran
+            # this code, therefore it is alive. Cheap, no I/O.
+            self._respond_json(200, {"status": "ok"})
+            return
+        if parsed.path == "/ready":
+            # Readiness: prove we can reach the workspace by issuing a
+            # tiny query. If SQLite has gone sideways or the disk is
+            # gone, we want load balancers to stop sending traffic.
+            try:
+                self.workspace.list_run_results()
+                self._respond_json(200, {"status": "ready"})
+            except Exception as exc:
+                self._respond_json(503, {"status": "unready", "error": str(exc)})
+            return
         if is_api_path(parsed.path):
             handle_api_request(self, "GET", self.workspace)
             return
@@ -925,6 +940,16 @@ class WebDashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _respond_json(self, code: int, payload: dict):
+        import json as _json
+
+        body = _json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _respond_export(self, run_id: str, fmt: str):
         from competitive_intel_agents.export import export_run
 
@@ -962,17 +987,42 @@ def start_web_server(
     host: str = "127.0.0.1",
     port: int = 8080,
 ) -> None:
-    """Start the web dashboard server (blocking)."""
+    """Start the web dashboard server (blocking).
+
+    Installs SIGTERM and SIGINT handlers that call ``server.shutdown()``
+    so containers and operators can stop the process cleanly. Background
+    daemon threads (started by ``start_run_from_form``) are torn down by
+    process exit — we intentionally do not block on them so a stuck run
+    cannot prevent shutdown.
+    """
+    import signal
+
     from competitive_intel_agents.logging import configure_logging
 
     configure_logging()
     WebDashboardHandler.workspace = workspace
     server = ThreadingHTTPServer((host, port), WebDashboardHandler)
+
+    _logger = __import__("competitive_intel_agents.logging", fromlist=["get_logger"]).get_logger(__name__)
+
+    def _shutdown(signum, _frame):
+        _logger.info(
+            "shutting down on signal",
+            extra={"signum": signum},
+        )
+        # ``shutdown`` blocks until ``serve_forever`` returns; calling
+        # it from a signal handler is safe because the threading server
+        # runs in another thread once we are inside ``serve_forever``.
+        server.shutdown()
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
     try:
         print(f"Web dashboard: http://{host}:{port}")
         server.serve_forever()
-    except KeyboardInterrupt:
-        server.shutdown()
+    finally:
+        server.server_close()
 
 
 __all__ = [
