@@ -19,6 +19,7 @@ from competitive_intel_agents.runtime.tool_runtime import (
     ToolPolicy,
     ToolRuntime,
 )
+from competitive_intel_agents.runtime.rate_limiter import TokenBucket
 from competitive_intel_agents.runtime.web_tools import (
     CachedWebFetch,
     BaiduSearch,
@@ -55,6 +56,7 @@ __all__ = [
     "Provider",
     "SerperSearch",
     "SogouSearch",
+    "TokenBucket",
     "ToolPolicy",
     "ToolRuntime",
     "WebFetchTool",
