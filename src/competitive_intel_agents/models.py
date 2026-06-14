@@ -341,10 +341,16 @@ class RunResult(SerializableModel):
     status: str
     report_id: str | None = None
     review_feedback: list[ReviewFeedback] = field(default_factory=list)
+    # Caveats are reviewer feedback that survived the bounded rework
+    # budget but did NOT block delivery — used by status
+    # ``approved_with_caveats`` to surface remaining concerns alongside
+    # the final report instead of failing the run.
+    caveats: list[ReviewFeedback] = field(default_factory=list)
     error: str | None = None
 
     _nested_list_types: ClassVar[dict[str, type[SerializableModel]]] = {
-        "review_feedback": ReviewFeedback
+        "review_feedback": ReviewFeedback,
+        "caveats": ReviewFeedback,
     }
 
     def __post_init__(self) -> None:

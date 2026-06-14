@@ -155,9 +155,10 @@ def test_render_workflow_map_shows_agent_and_rework_paths():
     assert "needs_more_evidence" in html
     assert "rework_failed" in html
     assert "approved" in html
+    assert "approved_with_caveats" in html
     assert "Agent Contract" in html
     assert "collector → analyst → writer → reviewer" in html
-    assert "Only approved is a successful final report" in html
+    assert "approved means the report passed every reviewer check" in html
 
 
 def test_render_run_list_handles_empty_workspace():

@@ -259,6 +259,17 @@ def _print_summary(input_path: Path, orchestrator: Orchestrator, result) -> None
         print(f"Report id: {result.report_id}")
     if result.review_feedback:
         print(f"Review feedback: {len(result.review_feedback)}")
+    if result.caveats:
+        print(f"Caveats: {len(result.caveats)}")
+        print("--- Reviewer Caveats ---")
+        for item in result.caveats:
+            print(
+                f"  [{item.severity}] {item.issue} "
+                f"({item.target_agent}/{item.target_artifact_id})"
+            )
+            print(f"    {item.message}")
+            if item.required_action:
+                print(f"    Action: {item.required_action}")
 
 
 def _make_orchestrator(
@@ -359,10 +370,11 @@ def _print_claims(orchestrator: Orchestrator, run_id: str) -> None:
 
 
 def _print_feedback(result) -> None:
-    if not result.review_feedback:
+    items = list(result.review_feedback) + list(getattr(result, "caveats", []))
+    if not items:
         print("No reviewer feedback.")
         return
-    for item in result.review_feedback:
+    for item in items:
         print(
             f"{item.issue}\t{item.target_agent}\t"
             f"{item.target_artifact_id}\t{item.required_action}"

@@ -150,11 +150,22 @@ class Orchestrator:
             selected_feedback = self._select_upstream_feedback(remaining_feedback)
             rework_result = loop.apply(context, selected_feedback, all_feedback=remaining_feedback)
             if rework_result.status != "applied":
+                report_id = self._latest_report_id(context.run_id)
+                status = self._status_for_unresolved_feedback(
+                    remaining_feedback, report_id=report_id
+                )
                 return RunResult(
                     run_id=context.run_id,
-                    status=self._status_for_unresolved_feedback(remaining_feedback),
-                    report_id=self._latest_report_id(context.run_id),
-                    review_feedback=remaining_feedback,
+                    status=status,
+                    report_id=report_id,
+                    review_feedback=(
+                        [] if status == "approved_with_caveats" else remaining_feedback
+                    ),
+                    caveats=(
+                        list(remaining_feedback)
+                        if status == "approved_with_caveats"
+                        else []
+                    ),
                     error=rework_result.status,
                 )
             if rework_result.final_decision == "stop":
@@ -175,11 +186,20 @@ class Orchestrator:
                 )
             if latest_reviewer and latest_reviewer[0].review_feedback:
                 remaining_feedback = latest_reviewer[0].review_feedback
+        report_id = self._latest_report_id(context.run_id)
+        status = self._status_for_unresolved_feedback(
+            remaining_feedback, report_id=report_id
+        )
         return RunResult(
             run_id=context.run_id,
-            status=self._status_for_unresolved_feedback(remaining_feedback),
-            report_id=self._latest_report_id(context.run_id),
-            review_feedback=remaining_feedback,
+            status=status,
+            report_id=report_id,
+            review_feedback=(
+                [] if status == "approved_with_caveats" else remaining_feedback
+            ),
+            caveats=(
+                list(remaining_feedback) if status == "approved_with_caveats" else []
+            ),
             error="max_rework_attempts_exceeded",
         )
 
@@ -199,14 +219,30 @@ class Orchestrator:
     @staticmethod
     def _status_for_unresolved_feedback(
         feedback_items: list[ReviewFeedback],
+        report_id: str | None = None,
     ) -> str:
-        if feedback_items and all(
+        if not feedback_items:
+            return "rework_failed"
+        if all(
             item.target_agent == "collector"
             and item.issue == "missing_source"
             and item.blocking
             for item in feedback_items
         ):
+            # Evidence really is insufficient — no usable report can be
+            # delivered.
             return "needs_more_evidence"
+        # If a deliverable report exists and the only remaining blockers
+        # are downstream defects (analyst/writer), classify the run as
+        # "approved with caveats" rather than a hard failure: the report
+        # is good enough to ship as long as the user sees the reviewer's
+        # remaining concerns. Without a report there's nothing to ship,
+        # so fall back to rework_failed.
+        if report_id is not None and not any(
+            item.target_agent == "collector" and item.issue == "missing_source"
+            for item in feedback_items
+        ):
+            return "approved_with_caveats"
         return "rework_failed"
 
     def _runtime_for(self, agent_name: str) -> ModelRuntime | None:

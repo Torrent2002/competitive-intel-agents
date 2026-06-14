@@ -1,7 +1,9 @@
 from competitive_intel_agents.agents import BaseAgent
+from competitive_intel_agents.artifacts import InMemoryArtifactStore
 from competitive_intel_agents.models import (
     AgentResult,
     CompetitiveIntelRequest,
+    ReportDraft,
     RoundEvent,
     ReviewFeedback,
 )
@@ -342,3 +344,127 @@ def test_orchestrator_reports_needs_more_evidence_for_persistent_collector_block
     assert result.error == "max_rework_attempts_exceeded"
     assert result.review_feedback[0].issue == "missing_source"
     assert result.review_feedback[0].target_agent == "collector"
+
+
+def test_orchestrator_returns_approved_with_caveats_when_report_survives() -> None:
+    """When non-collector blockers persist after the rework budget but a
+    deliverable report exists, the run should ship as approved_with_caveats
+    with the residual feedback exposed via RunResult.caveats."""
+
+    artifacts = InMemoryArtifactStore()
+
+    class CaveatHarness:
+        def __init__(self) -> None:
+            self.reviewer_calls = 0
+            self.writer_calls = 0
+
+        def run_agent(self, context, agent: BaseAgent) -> AgentResult:
+            if agent.name == "writer":
+                self.writer_calls += 1
+                report_id = f"report_caveat_{self.writer_calls:03d}"
+                # Each writer round persists a fresh report id. The
+                # real writer behaves the same — it does not edit the
+                # superseded artifact in place.
+                report = ReportDraft(
+                    id=report_id,
+                    run_id=context.run_id,
+                    sections={"Summary": f"ACME ships v{self.writer_calls}."},
+                    claim_ids=[],
+                    source_ids=[],
+                )
+                artifacts.save_report(report)
+                return AgentResult(
+                    agent="writer",
+                    decision="stop",
+                    rounds=1,
+                    output_artifact_ids=[report.id],
+                )
+            if agent.name == "reviewer":
+                self.reviewer_calls += 1
+                # Always target an artifact id that does NOT exist in
+                # the store, so ReworkLoop's prepare_changes path takes
+                # the ArtifactNotFoundError branch (no version bump,
+                # no DuplicateArtifactError) on every iteration. The
+                # blocker keeps surfacing → orchestrator exhausts the
+                # rework budget → caveats path engages.
+                return AgentResult(
+                    agent="reviewer",
+                    decision="rework",
+                    rounds=1,
+                    review_feedback=[
+                        ReviewFeedback(
+                            issue="unsupported_claim",
+                            target_agent="analyst",
+                            target_artifact_id="report_caveat_phantom",
+                            message="Headcount figure not supported by sources.",
+                            required_action="Drop or back the headcount claim.",
+                        )
+                    ],
+                )
+            return AgentResult(agent=agent.name, decision="stop", rounds=1)
+
+    harness = CaveatHarness()
+    orchestrator = Orchestrator(
+        artifacts=artifacts,
+        harness=harness,
+        enable_rework=True,
+        max_rework_attempts=2,
+        run_id_factory=lambda: "run_with_caveats",
+    )
+
+    result = orchestrator.run(make_request())
+
+    assert result.status == "approved_with_caveats"
+    # Latest report is the most recent writer output.
+    assert result.report_id is not None
+    assert result.report_id.startswith("report_caveat_")
+    assert result.error == "max_rework_attempts_exceeded"
+    # Residual feedback is moved to caveats — review_feedback stays empty
+    # so downstream code that branches on a non-empty review_feedback
+    # list does not treat the run as a hard failure.
+    assert result.review_feedback == []
+    assert len(result.caveats) == 1
+    assert result.caveats[0].issue == "unsupported_claim"
+    assert result.caveats[0].target_agent == "analyst"
+
+
+def test_orchestrator_keeps_rework_failed_when_no_report_was_produced() -> None:
+    """If non-collector blockers persist AND no report exists, there is
+    nothing to deliver — the run must remain rework_failed rather than
+    silently turning into approved_with_caveats."""
+
+    class NoReportHarness:
+        def run_agent(self, context, agent: BaseAgent) -> AgentResult:
+            if agent.name == "reviewer":
+                return AgentResult(
+                    agent="reviewer",
+                    decision="rework",
+                    rounds=1,
+                    review_feedback=[
+                        ReviewFeedback(
+                            issue="missing_section",
+                            target_agent="writer",
+                            target_artifact_id="report_missing",
+                            message="Report omits Pricing.",
+                            required_action="Add a Pricing section.",
+                        )
+                    ],
+                )
+            # Writer/analyst/collector all stop without producing
+            # artifacts — no report is ever persisted.
+            return AgentResult(agent=agent.name, decision="stop", rounds=1)
+
+    orchestrator = Orchestrator(
+        harness=NoReportHarness(),
+        enable_rework=True,
+        max_rework_attempts=1,
+        run_id_factory=lambda: "run_no_report",
+    )
+
+    result = orchestrator.run(make_request())
+
+    assert result.status == "rework_failed"
+    assert result.report_id is None
+    assert result.caveats == []
+    # The blocker stays on review_feedback for diagnostics.
+    assert result.review_feedback and result.review_feedback[0].issue == "missing_section"

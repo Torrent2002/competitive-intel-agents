@@ -48,6 +48,7 @@ _STYLE = (
     ".status{display:inline-block;padding:.15em .6em;border-radius:12px;"
     "font-size:.8em;font-weight:600;}\n"
     ".status.completed{background:#d1fae5;color:#065f46;}\n"
+    ".status.approved_with_caveats{background:#fef9c3;color:#854d0e;}\n"
     ".status.needs_rework{background:#fef3c7;color:#92400e;}\n"
     ".status.needs_more_evidence{background:#ffedd5;color:#9a3412;}\n"
     ".status.aborted{background:#fee2e2;color:#991b1b;}\n"
@@ -211,7 +212,7 @@ def render_workflow_map() -> str:
         f"{_flow_arrow('normal')}"
         f"{_flow_node('reviewer', 'Reviewer', 'Checks evidence, user-question coverage, competitor coverage, and report clarity.')}"
         f"{_flow_arrow('normal')}"
-        f"{_flow_node('status-node', 'Report / Final Status', 'Ends as approved, needs_more_evidence, rework_failed, needs_rework, or aborted.')}"
+        f"{_flow_node('status-node', 'Report / Final Status', 'Ends as approved, approved_with_caveats, needs_more_evidence, rework_failed, needs_rework, or aborted.')}"
         "</div></section>\n"
         "<section><h2>Possible Rework Paths</h2>\n"
         "<div class=\"flow-paths\">\n"
@@ -223,8 +224,9 @@ def render_workflow_map() -> str:
         "<section><h2>Terminal Outcomes</h2>\n"
         "<div class=\"flow-paths\">\n"
         f"{_path_card('approved', 'Reviewer → approved', 'All blocking evidence, claim, report, and user-question checks pass.')}"
+        f"{_path_card('approved', 'Orchestrator → approved_with_caveats', 'A deliverable report exists; remaining non-evidence blockers are surfaced as caveats next to the report rather than failing the run.')}"
         f"{_path_card('failed', 'Orchestrator → needs_more_evidence', 'Collector missing_source blockers remain after bounded rework attempts.')}"
-        f"{_path_card('failed', 'Orchestrator → rework_failed', 'Non-collector blockers remain after bounded rework attempts.')}"
+        f"{_path_card('failed', 'Orchestrator → rework_failed', 'Non-collector blockers remain with no usable report after bounded rework attempts.')}"
         f"{_path_card('failed', 'Any Agent → aborted', 'An agent exceeds retry limits or returns an abort decision.')}"
         "</div></section>\n"
         "<section><h2>Legend</h2>\n"
@@ -237,7 +239,7 @@ def render_workflow_map() -> str:
         "<section class=\"panel\"><h2>Agent Contract</h2>\n"
         "<ul class=\"contract-list\">\n"
         "<li><strong>Inputs and outputs</strong>Collector writes sources, Analyst writes sourced claims, Writer writes the report, Reviewer writes feedback or approval.</li>\n"
-        "<li><strong>Success</strong>Only approved is a successful final report.</li>\n"
+        "<li><strong>Success</strong>approved means the report passed every reviewer check; approved_with_caveats means a deliverable report exists but the reviewer flagged unresolved concerns shown alongside it.</li>\n"
         "<li><strong>Evidence gap</strong>needs_more_evidence means collector missing_source blockers remain after bounded rework.</li>\n"
         "<li><strong>Failure</strong>rework_failed means non-collector blockers remain; aborted means execution stopped.</li>\n"
         "<li><strong>Routing priority</strong>collector → analyst → writer → reviewer.</li>\n"
@@ -258,7 +260,8 @@ def render_run_detail(workspace: "LocalWorkspace", run_id: str) -> str | None:
     )
     display_status = (
         result.status
-        if result.status in {"running", "needs_more_evidence"}
+        if result.status
+        in {"running", "needs_more_evidence", "approved_with_caveats", "rework_failed"}
         else snapshot.status
     )
     sources = workspace.artifacts.list_sources(run_id)
@@ -311,6 +314,35 @@ def render_run_detail(workspace: "LocalWorkspace", run_id: str) -> str | None:
             )
         feedback_html = (
             f"<section><h2>Reviewer Feedback ({len(result.review_feedback)})</h2>"
+            f"<ul>{items}</ul></section>"
+        )
+    # Reviewer caveats — concerns that survived the bounded rework
+    # budget but did NOT block delivery.  Surfaced under the report so
+    # readers see what the reviewer still flagged without treating the
+    # whole run as a hard failure.
+    caveats_html = ""
+    caveats = list(getattr(result, "caveats", []) or [])
+    if caveats:
+        items = ""
+        for item in caveats:
+            action = (
+                f"<div class=\"meta\">Action: {_esc(item.required_action)}</div>"
+                if item.required_action
+                else ""
+            )
+            items += (
+                f"<li><strong>{_esc(item.issue)}</strong> "
+                f"<span class=\"meta\">[{_esc(item.severity)}]</span> → "
+                f"{_esc(item.target_agent)} "
+                f"(<code>{_esc(item.target_artifact_id)}</code>)<br/>"
+                f"{_esc(item.message)}{action}</li>\n"
+            )
+        caveats_html = (
+            f"<section class=\"panel\"><h2>Reviewer Caveats ({len(caveats)})</h2>"
+            "<p class=\"meta\">The report was approved, but the reviewer "
+            "could not fully resolve the following points within the "
+            "rework budget. Review them before relying on the affected "
+            "sections.</p>"
             f"<ul>{items}</ul></section>"
         )
     feedback_flow_html = _render_feedback_flow(result)
@@ -366,6 +398,7 @@ def render_run_detail(workspace: "LocalWorkspace", run_id: str) -> str | None:
         f"<section><h2>Claims ({len(claims)})</h2>\n"
         f"<table><tr><th>ID</th><th>Text</th><th>Confidence</th><th>Source IDs</th></tr>"
         f"{claims_rows}</table></section>\n"
+        f"{caveats_html}"
         f"{feedback_html}"
         f"{feedback_flow_html}"
         f"<section><h2>Journal Events ({len(events)})</h2>\n"
@@ -567,6 +600,11 @@ def _agent_workflow_states(events, run_status: str) -> dict[str, dict[str, objec
     elif run_status in {"needs_rework", "needs_more_evidence"}:
         _mark_rework_targets(events, states)
         _mark_pending_agents(states, "blocked")
+    elif run_status == "approved_with_caveats":
+        # Treat as a successful terminal state — the report shipped,
+        # caveats are surfaced under the report rather than as agent
+        # failures.
+        _mark_terminal_agent(states, "completed")
 
     return states
 
