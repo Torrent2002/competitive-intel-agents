@@ -473,10 +473,14 @@ def make_default_search_adapter(
         else os.environ.get("CIA_SERPER_API_KEY", "").strip()
     )
 
-    html_chain = [DuckDuckGoSearch(timeout=8), BingSearch()]
-
+    # Build adapters lazily per branch.  ``BingSearch()`` instantiates
+    # ``BrowserHttpClient`` which imports ``curl_cffi`` at __init__
+    # time, so eagerly constructing it for every branch would raise
+    # ``ImportError`` on hosts that only need the Serper path and have
+    # not installed the optional binary dependency. The branches below
+    # only build the adapters they actually return.
     if chosen == "html":
-        return FallbackSearch(html_chain)
+        return FallbackSearch([DuckDuckGoSearch(timeout=8), BingSearch()])
     if chosen == "serper":
         # Serper-only mode is opt-in for tightly-budgeted quotas where
         # HTML fallback shouldn't kick in even on Serper failure.
@@ -484,8 +488,10 @@ def make_default_search_adapter(
     # "auto" (default): prefer Serper when keyed; otherwise behave
     # exactly as before — HTML adapters only.
     if api_key:
-        return FallbackSearch([SerperSearch(api_key=api_key), *html_chain])
-    return FallbackSearch(html_chain)
+        return FallbackSearch(
+            [SerperSearch(api_key=api_key), DuckDuckGoSearch(timeout=8), BingSearch()]
+        )
+    return FallbackSearch([DuckDuckGoSearch(timeout=8), BingSearch()])
 
 
 class WebSearchTool:

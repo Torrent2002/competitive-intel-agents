@@ -354,6 +354,35 @@ def test_make_default_search_adapter_keyless_keeps_html_only(monkeypatch) -> Non
     assert any(isinstance(a, DuckDuckGoSearch) for a in adapter._adapters)
 
 
+def test_make_default_search_adapter_serper_only_does_not_import_curl_cffi(
+    monkeypatch,
+) -> None:
+    """``provider="serper"`` must build the chain WITHOUT touching
+    BingSearch — otherwise hosts that only need the API path can't run
+    the factory unless they also install ``curl_cffi``. Regression test
+    for the eager-construction bug that crashed run_3dc810266d52."""
+
+    # Make BrowserHttpClient explosive: any attempt to instantiate it
+    # raises, simulating a host without curl_cffi installed. We do NOT
+    # call _stub_browser_client here — the point is to prove the
+    # serper-only path never reaches BrowserHttpClient.
+    class _Explodes:
+        def __init__(self, *a, **kw):
+            raise ImportError("simulated: curl_cffi not installed")
+
+    import competitive_intel_agents.runtime.web_tools as wt
+
+    monkeypatch.setattr(wt, "BrowserHttpClient", _Explodes)
+    monkeypatch.delenv("CIA_SEARCH_PROVIDER", raising=False)
+    monkeypatch.setenv("CIA_SERPER_API_KEY", "live-key")
+
+    adapter = make_default_search_adapter(provider="serper")
+
+    assert isinstance(adapter, FallbackSearch)
+    assert len(adapter._adapters) == 1
+    assert isinstance(adapter._adapters[0], SerperSearch)
+
+
 def _stub_browser_client(monkeypatch) -> None:
     """Replace BrowserHttpClient with a no-op so its curl_cffi import
     doesn't fire when BingSearch() is default-constructed in tests."""
