@@ -28,6 +28,7 @@ from competitive_intel_agents.runtime import (
     make_default_search_adapter,
 )
 from competitive_intel_agents.harness import InMemoryCheckpointStore, RuntimeHarness
+from competitive_intel_agents.web.api import handle_api_request, is_api_path
 
 if TYPE_CHECKING:
     from competitive_intel_agents.workspace import LocalWorkspace
@@ -862,6 +863,24 @@ class WebDashboardHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/health":
+            # Liveness: this process accepted the connection and ran
+            # this code, therefore it is alive. Cheap, no I/O.
+            self._respond_json(200, {"status": "ok"})
+            return
+        if parsed.path == "/ready":
+            # Readiness: prove we can reach the workspace by issuing a
+            # tiny query. If SQLite has gone sideways or the disk is
+            # gone, we want load balancers to stop sending traffic.
+            try:
+                self.workspace.list_run_results()
+                self._respond_json(200, {"status": "ready"})
+            except Exception as exc:
+                self._respond_json(503, {"status": "unready", "error": str(exc)})
+            return
+        if is_api_path(parsed.path):
+            handle_api_request(self, "GET", self.workspace)
+            return
         if parsed.path == "/":
             html = render_run_list(self.workspace)
             self._respond_html(200, html)
@@ -890,12 +909,26 @@ class WebDashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if is_api_path(parsed.path):
+            handle_api_request(self, "POST", self.workspace)
+            return
         if parsed.path != "/runs":
             self.send_response(404)
             self.end_headers()
             self.wfile.write(b"Not found")
             return
-        length = int(self.headers.get("Content-Length", "0"))
+        # Bound Content-Length so a malformed or hostile client cannot
+        # instruct us to allocate / read an unbounded chunk. Form posts
+        # for this dashboard are at most a few hundred bytes; 64 KiB is
+        # a generous ceiling that still slams the door on abuse.
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+        except (TypeError, ValueError):
+            self._respond_html(400, _render_error("invalid Content-Length header"))
+            return
+        if length < 0 or length > 64 * 1024:
+            self._respond_html(400, _render_error("request body too large or invalid"))
+            return
         body = self.rfile.read(length).decode("utf-8", errors="replace")
         form = parse_qs(body)
         try:
@@ -914,6 +947,16 @@ class WebDashboardHandler(BaseHTTPRequestHandler):
         body = html.encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _respond_json(self, code: int, payload: dict):
+        import json as _json
+
+        body = _json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -955,17 +998,53 @@ def start_web_server(
     host: str = "127.0.0.1",
     port: int = 8080,
 ) -> None:
-    """Start the web dashboard server (blocking)."""
-    from competitive_intel_agents.logging import configure_logging
+    """Start the web dashboard server (blocking).
+
+    Installs SIGTERM and SIGINT handlers that call ``server.shutdown()``
+    so containers and operators can stop the process cleanly. Background
+    daemon threads (started by ``start_run_from_form``) are torn down by
+    process exit — we intentionally do not block on them so a stuck run
+    cannot prevent shutdown.
+
+    The signal handler dispatches ``server.shutdown()`` onto a separate
+    thread because ``shutdown`` blocks until ``serve_forever`` returns.
+    Python signals are delivered on the main thread, which is the same
+    thread blocked inside ``serve_forever``: calling ``shutdown`` there
+    would deadlock until the kernel finally SIGKILLs the container.
+    """
+    import signal
+    import threading
+
+    from competitive_intel_agents.logging import configure_logging, get_logger
 
     configure_logging()
     WebDashboardHandler.workspace = workspace
     server = ThreadingHTTPServer((host, port), WebDashboardHandler)
+
+    _logger = get_logger(__name__)
+
+    def _shutdown(signum, _frame):
+        _logger.info(
+            "shutting down on signal",
+            extra={"signum": signum},
+        )
+        # Spawn a worker so the signal handler returns immediately and
+        # ``serve_forever`` (running on the main thread) can observe the
+        # shutdown flag set by ``server.shutdown``.
+        threading.Thread(
+            target=server.shutdown,
+            name="web-shutdown",
+            daemon=True,
+        ).start()
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
     try:
         print(f"Web dashboard: http://{host}:{port}")
         server.serve_forever()
-    except KeyboardInterrupt:
-        server.shutdown()
+    finally:
+        server.server_close()
 
 
 __all__ = [

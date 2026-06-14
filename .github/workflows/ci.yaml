@@ -1,0 +1,54 @@
+name: CI
+
+# Runs the unit test suite (excluding the documented pre-existing
+# failures) on every PR and on every push to main. The workflow is
+# stdlib-only on the test side — no external services, no secrets, no
+# matrix — so it stays green and fast from day one.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  # Cancel superseded runs on the same ref when new commits arrive,
+  # so we don't burn CI minutes on stale code.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: unit tests (python 3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install project (editable)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest
+
+      - name: Run pytest
+        env:
+          # Make sure logs in CI are JSON so failures are parseable from
+          # the action log, matching production formatting.
+          CIA_LOG_FORMAT: json
+        run: |
+          # The 12 pre-existing failures on main are auto-marked
+          # xfail(strict=True) by tests/conftest.py — they show up as
+          # XFAIL on the report and do not fail the build. If any of
+          # them ever start passing, pytest exits non-zero and the
+          # owner is forced to remove the entry from the list.
+          pytest tests/unit -q
