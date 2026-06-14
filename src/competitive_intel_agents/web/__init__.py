@@ -956,6 +956,9 @@ def start_web_server(
     port: int = 8080,
 ) -> None:
     """Start the web dashboard server (blocking)."""
+    from competitive_intel_agents.logging import configure_logging
+
+    configure_logging()
     WebDashboardHandler.workspace = workspace
     server = ThreadingHTTPServer((host, port), WebDashboardHandler)
     try:

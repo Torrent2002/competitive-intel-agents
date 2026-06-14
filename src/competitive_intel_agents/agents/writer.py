@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import sys as _sys
-
 from competitive_intel_agents.agents.base import BaseAgent
 from competitive_intel_agents.agents.prompt_context import (
     claims_list_payload,
@@ -22,6 +20,9 @@ from competitive_intel_agents.models import (
     RunContext,
 )
 from competitive_intel_agents.runtime.model_runtime import ModelRuntime
+from competitive_intel_agents.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class WriterAgent(BaseAgent):
@@ -75,16 +76,16 @@ class WriterAgent(BaseAgent):
         if self._model_runtime is not None:
             sections = self._model_sections(context, claims)
             if not sections or all(not v or "[FAKE]" in v for v in sections.values()):
-                print(
-                    "[writer] WARNING: model failed, falling back to template report",
-                    file=_sys.stderr,
+                logger.warning(
+                    "model failed, falling back to template report",
+                    extra={"run_id": context.run_id, "agent": "writer"},
                 )
                 sections = self._template_sections(context, claims)
                 template_fallback = True
         else:
-            print(
-                "[writer] WARNING: no model runtime, using template report",
-                file=_sys.stderr,
+            logger.warning(
+                "no model runtime, using template report",
+                extra={"run_id": context.run_id, "agent": "writer"},
             )
             sections = self._template_sections(context, claims)
             template_fallback = True
@@ -226,9 +227,15 @@ class WriterAgent(BaseAgent):
             model_req = prompt_lib.build(self.name, task, prompt_context_data)
         resp = self._model_runtime.complete(model_req)
         if not resp.ok or not resp.parsed:
-            print(
-                f"[writer] model call failed: ok={resp.ok} parsed={resp.parsed is not None} error={resp.error}",
-                file=_sys.stderr,
+            logger.error(
+                "writer model call failed",
+                extra={
+                    "run_id": context.run_id,
+                    "agent": "writer",
+                    "ok": resp.ok,
+                    "parsed": resp.parsed is not None,
+                    "error": resp.error,
+                },
             )
             return {}
 
@@ -236,15 +243,23 @@ class WriterAgent(BaseAgent):
         try:
             validator.validate(self.name, resp.parsed)
         except Exception as exc:
-            print(f"[writer] validation failed: {exc}", file=_sys.stderr)
+            logger.error(
+                "writer output validation failed",
+                extra={"run_id": context.run_id, "agent": "writer", "error": str(exc)},
+            )
             return {}
 
         sections = resp.parsed.get("sections", {})
         if not isinstance(sections, dict) or not sections:
-            print(
-                f"[writer] LLM returned no usable sections (type={type(sections).__name__}, "
-                f"empty={not sections}); top-level keys={list(resp.parsed.keys())}",
-                file=_sys.stderr,
+            logger.warning(
+                "writer LLM returned no usable sections",
+                extra={
+                    "run_id": context.run_id,
+                    "agent": "writer",
+                    "type": type(sections).__name__,
+                    "empty": not sections,
+                    "keys": list(resp.parsed.keys()),
+                },
             )
             return {}
 
@@ -277,10 +292,14 @@ class WriterAgent(BaseAgent):
             result[section] = value
 
         if missing_keys:
-            print(
-                f"[writer] LLM output missing/empty sections: {missing_keys}; "
-                f"LLM returned keys={list(sections.keys())}",
-                file=_sys.stderr,
+            logger.warning(
+                "writer LLM output missing or empty sections",
+                extra={
+                    "run_id": context.run_id,
+                    "agent": "writer",
+                    "missing": missing_keys,
+                    "returned_keys": list(sections.keys()),
+                },
             )
 
         # Record conversation and agent context on success

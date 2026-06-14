@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sys as _sys
 
 from competitive_intel_agents.agents.base import BaseAgent
 from competitive_intel_agents.agents.prompt_context import (
@@ -22,6 +21,9 @@ from competitive_intel_agents.models import (
     SourceArtifact,
 )
 from competitive_intel_agents.runtime.model_runtime import ModelRuntime
+from competitive_intel_agents.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class AnalystAgent(BaseAgent):
@@ -66,16 +68,16 @@ class AnalystAgent(BaseAgent):
         if self._model_runtime is not None:
             saved_ids = self._model_claims(context, sources, existing_claims)
             if not saved_ids:
-                print(
-                    "[analyst] WARNING: model failed, falling back to template claims",
-                    file=_sys.stderr,
+                logger.warning(
+                    "model failed, falling back to template claims",
+                    extra={"run_id": context.run_id, "agent": "analyst"},
                 )
                 saved_ids = self._template_claims(context, sources, existing_claims)
                 template_fallback = True
         else:
-            print(
-                "[analyst] WARNING: no model runtime, using template claims",
-                file=_sys.stderr,
+            logger.warning(
+                "no model runtime, using template claims",
+                extra={"run_id": context.run_id, "agent": "analyst"},
             )
             saved_ids = self._template_claims(context, sources, existing_claims)
             template_fallback = True
@@ -192,9 +194,15 @@ class AnalystAgent(BaseAgent):
             model_req = prompt_lib.build(self.name, task, prompt_context)
         resp = self._model_runtime.complete(model_req)
         if not resp.ok or not resp.parsed:
-            print(
-                f"[analyst] model call failed: ok={resp.ok} parsed={resp.parsed is not None} error={resp.error}",
-                file=_sys.stderr,
+            logger.error(
+                "analyst model call failed",
+                extra={
+                    "run_id": context.run_id,
+                    "agent": "analyst",
+                    "ok": resp.ok,
+                    "parsed": resp.parsed is not None,
+                    "error": resp.error,
+                },
             )
             return []
 
@@ -202,7 +210,10 @@ class AnalystAgent(BaseAgent):
         try:
             validator.validate(self.name, resp.parsed)
         except Exception as exc:
-            print(f"[analyst] validation failed: {exc}", file=_sys.stderr)
+            logger.error(
+                "analyst output validation failed",
+                extra={"run_id": context.run_id, "agent": "analyst", "error": str(exc)},
+            )
             return []
 
         # Save source assessments to source metadata

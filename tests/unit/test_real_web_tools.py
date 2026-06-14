@@ -394,3 +394,116 @@ def _stub_browser_client(monkeypatch) -> None:
     import competitive_intel_agents.runtime.web_tools as wt
 
     monkeypatch.setattr(wt, "BrowserHttpClient", _Inert)
+
+
+# ── Per-engine rate limiting (Module 36) ───────────────────────
+
+
+class _RecordingLimiter:
+    """Test double for ``TokenBucket`` that records call sites instead
+    of actually sleeping. Lets the rate-limiting tests assert the order
+    of acquire/penalize without time injection plumbing."""
+
+    def __init__(self) -> None:
+        self.acquires = 0
+        self.penalizes = 0
+
+    def acquire(self) -> None:
+        self.acquires += 1
+
+    def penalize(self, factor: float = 0.5, duration: float = 30.0) -> None:
+        self.penalizes += 1
+
+
+def test_search_adapter_calls_rate_limiter_acquire_before_request() -> None:
+    """Each adapter must acquire its bucket exactly once per search."""
+    limiter = _RecordingLimiter()
+    payloads = {
+        "https://html.duckduckgo.com/html/?q=acme": "<html>no results</html>",
+        "https://lite.duckduckgo.com/lite/?q=acme": "<html>no results</html>",
+    }
+    adapter = DuckDuckGoSearch(http_client=StubHttpClient(payloads), rate_limiter=limiter)
+
+    adapter.search("acme", limit=5)
+
+    assert limiter.acquires == 1
+    assert limiter.penalizes == 0
+
+
+def test_serper_429_triggers_penalize_then_returns_empty() -> None:
+    """A 429 response from Serper must penalize the bucket so the
+    rest of the run backs off, while still returning ``[]`` so the
+    fallback chain moves on to the next adapter."""
+    from urllib import error as urllib_error
+
+    class _ExplodingTransport:
+        def post_json(self, url, headers, payload, timeout):
+            raise urllib_error.HTTPError(
+                url, 429, "Too Many Requests", {}, None  # type: ignore[arg-type]
+            )
+
+    limiter = _RecordingLimiter()
+    search = SerperSearch(
+        api_key="test-key",
+        transport=_ExplodingTransport(),
+        rate_limiter=limiter,
+    )
+
+    results = search.search("anything", limit=3)
+
+    assert results == []
+    assert limiter.acquires == 1
+    assert limiter.penalizes == 1
+
+
+def test_web_fetch_uses_per_domain_rate_limiter() -> None:
+    """Same host hit twice must acquire its bucket twice; different
+    host must use a separate bucket."""
+
+    class _RecordingClient:
+        def __init__(self) -> None:
+            self.urls: list[str] = []
+
+        def get_text(self, url: str, timeout: float = 10.0) -> str:
+            self.urls.append(url)
+            return "<html><title>t</title>body</html>"
+
+    bucket_a = _RecordingLimiter()
+    bucket_b = _RecordingLimiter()
+    fetcher = WebFetchTool(
+        http_client=_RecordingClient(),
+        domain_rate_limiters={"a.example": bucket_a, "b.example": bucket_b},  # type: ignore[arg-type]
+    )
+
+    fetcher.run({"url": "https://a.example/x"})
+    fetcher.run({"url": "https://a.example/y"})
+    fetcher.run({"url": "https://b.example/z"})
+
+    assert bucket_a.acquires == 2
+    assert bucket_b.acquires == 1
+
+
+def test_web_fetch_penalizes_on_429() -> None:
+    """A 429 surfaced as a ``RuntimeError`` from the HTTP client
+    text must trigger ``penalize`` on the host's bucket, then re-raise."""
+
+    class _ExplodingClient:
+        def get_text(self, url: str, timeout: float = 10.0) -> str:
+            raise RuntimeError("failed to fetch https://x.example/y: HTTP 429 Too Many Requests")
+
+    bucket = _RecordingLimiter()
+    fetcher = WebFetchTool(
+        http_client=_ExplodingClient(),
+        domain_rate_limiters={"x.example": bucket},  # type: ignore[arg-type]
+    )
+
+    try:
+        fetcher.run({"url": "https://x.example/y"})
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("expected RuntimeError to propagate")
+
+    assert bucket.acquires == 1
+    assert bucket.penalizes == 1
+

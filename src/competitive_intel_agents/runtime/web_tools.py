@@ -15,6 +15,23 @@ from pathlib import Path
 from typing import Callable, Protocol
 from urllib import error as urllib_error, parse, request as urllib_request
 
+from ..logging import get_logger
+from .rate_limiter import TokenBucket
+
+logger = get_logger(__name__)
+
+
+def _looks_like_429(error_text: str) -> bool:
+    """Heuristic: detect ``HTTP 429`` markers in opaque error strings.
+
+    HTML adapters wrap ``urllib`` / ``curl_cffi`` exceptions in a generic
+    ``RuntimeError("failed to fetch …: <inner>")``, so the only way to
+    react to rate-limit responses without changing the HTTP-client
+    contract is to inspect the error text.
+    """
+    s = error_text.lower()
+    return "429" in s or "too many requests" in s
+
 
 def _get_ssl_context() -> ssl.SSLContext:
     """Return SSLContext with a known-good CA bundle.
@@ -123,11 +140,15 @@ class DuckDuckGoSearch:
         self,
         http_client: HttpClient | None = None,
         timeout: float = 10.0,
+        rate_limiter: TokenBucket | None = None,
     ) -> None:
         self._http_client = http_client or HttpClient()
         self._timeout = timeout
+        self._rate_limiter = rate_limiter
 
     def search(self, query: str, limit: int = 5) -> list[dict]:
+        if self._rate_limiter is not None:
+            self._rate_limiter.acquire()
         encoded = parse.quote_plus(query)
         results: list[dict] = []
         last_error = ""
@@ -142,6 +163,8 @@ class DuckDuckGoSearch:
                 last_error = f"html:0_results(len={len(html_text)})"
         except Exception as exc:
             last_error = f"html:{exc}"
+            if self._rate_limiter is not None and _looks_like_429(str(exc)):
+                self._rate_limiter.penalize()
         # Fallback to lite version
         if not results:
             try:
@@ -154,15 +177,19 @@ class DuckDuckGoSearch:
                     last_error += f" lite:0_results(len={len(html_text)})"
             except Exception as exc:
                 last_error += f" lite:{exc}"
+                if self._rate_limiter is not None and _looks_like_429(str(exc)):
+                    self._rate_limiter.penalize()
         if not results:
-            import sys
-            print(
-                f"[ddg] query={query[:50]!r} results=0 error={last_error}",
-                file=sys.stderr,
+            logger.warning(
+                "ddg search returned 0 results",
+                extra={"engine": "ddg", "query": query[:50], "error": last_error},
             )
             # Dump first bit of HTML to diagnose parsing failures
             try:
-                print(f"[ddg] html preview: {html_text[:300]!r}", file=sys.stderr)
+                logger.debug(
+                    "ddg html preview",
+                    extra={"engine": "ddg", "preview": html_text[:300]},
+                )
             except Exception:
                 pass
         return results
@@ -175,11 +202,15 @@ class BingSearch:
         self,
         http_client: HttpClient | BrowserHttpClient | None = None,
         timeout: float = 10.0,
+        rate_limiter: TokenBucket | None = None,
     ) -> None:
         self._http_client = http_client or BrowserHttpClient()
         self._timeout = timeout
+        self._rate_limiter = rate_limiter
 
     def search(self, query: str, limit: int = 5) -> list[dict]:
+        if self._rate_limiter is not None:
+            self._rate_limiter.acquire()
         encoded = parse.quote_plus(query)
         market = "zh-CN" if _contains_cjk(query) else "en-US"
         language = "zh-Hans" if market == "zh-CN" else "en"
@@ -190,20 +221,22 @@ class BingSearch:
                 timeout=self._timeout,
             )
         except Exception as exc:
-            import sys
-
-            print(
-                f"[bing] query={query[:50]!r} results=0 error={exc}",
-                file=sys.stderr,
+            if self._rate_limiter is not None and _looks_like_429(str(exc)):
+                self._rate_limiter.penalize()
+            logger.warning(
+                "bing search request failed",
+                extra={"engine": "bing", "query": query[:50], "error": str(exc)},
             )
             return []
         results = _parse_bing_html(html_text, limit)
         if not results:
-            import sys
-
-            print(
-                f"[bing] query={query[:50]!r} results=0 parsed_empty(len={len(html_text)})",
-                file=sys.stderr,
+            logger.warning(
+                "bing search parsed empty",
+                extra={
+                    "engine": "bing",
+                    "query": query[:50],
+                    "html_len": len(html_text),
+                },
             )
         return results
 
@@ -215,11 +248,15 @@ class BaiduSearch:
         self,
         http_client: HttpClient | BrowserHttpClient | None = None,
         timeout: float = 10.0,
+        rate_limiter: TokenBucket | None = None,
     ) -> None:
         self._http_client = http_client or BrowserHttpClient()
         self._timeout = timeout
+        self._rate_limiter = rate_limiter
 
     def search(self, query: str, limit: int = 5) -> list[dict]:
+        if self._rate_limiter is not None:
+            self._rate_limiter.acquire()
         encoded = parse.quote_plus(query)
         try:
             html_text = self._http_client.get_text(
@@ -227,20 +264,22 @@ class BaiduSearch:
                 timeout=self._timeout,
             )
         except Exception as exc:
-            import sys
-
-            print(
-                f"[baidu] query={query[:50]!r} results=0 error={exc}",
-                file=sys.stderr,
+            if self._rate_limiter is not None and _looks_like_429(str(exc)):
+                self._rate_limiter.penalize()
+            logger.warning(
+                "baidu search request failed",
+                extra={"engine": "baidu", "query": query[:50], "error": str(exc)},
             )
             return []
         results = _parse_baidu_html(html_text, limit)
         if not results:
-            import sys
-
-            print(
-                f"[baidu] query={query[:50]!r} results=0 parsed_empty(len={len(html_text)})",
-                file=sys.stderr,
+            logger.warning(
+                "baidu search parsed empty",
+                extra={
+                    "engine": "baidu",
+                    "query": query[:50],
+                    "html_len": len(html_text),
+                },
             )
         return results
 
@@ -252,11 +291,15 @@ class SogouSearch:
         self,
         http_client: HttpClient | BrowserHttpClient | None = None,
         timeout: float = 10.0,
+        rate_limiter: TokenBucket | None = None,
     ) -> None:
         self._http_client = http_client or BrowserHttpClient()
         self._timeout = timeout
+        self._rate_limiter = rate_limiter
 
     def search(self, query: str, limit: int = 5) -> list[dict]:
+        if self._rate_limiter is not None:
+            self._rate_limiter.acquire()
         encoded = parse.quote_plus(query)
         try:
             html_text = self._http_client.get_text(
@@ -264,20 +307,22 @@ class SogouSearch:
                 timeout=self._timeout,
             )
         except Exception as exc:
-            import sys
-
-            print(
-                f"[sogou] query={query[:50]!r} results=0 error={exc}",
-                file=sys.stderr,
+            if self._rate_limiter is not None and _looks_like_429(str(exc)):
+                self._rate_limiter.penalize()
+            logger.warning(
+                "sogou search request failed",
+                extra={"engine": "sogou", "query": query[:50], "error": str(exc)},
             )
             return []
         results = _parse_sogou_html(html_text, limit)
         if not results:
-            import sys
-
-            print(
-                f"[sogou] query={query[:50]!r} results=0 parsed_empty(len={len(html_text)})",
-                file=sys.stderr,
+            logger.warning(
+                "sogou search parsed empty",
+                extra={
+                    "engine": "sogou",
+                    "query": query[:50],
+                    "html_len": len(html_text),
+                },
             )
         return results
 
@@ -329,6 +374,7 @@ class SerperSearch:
         transport: SerperJsonTransport | None = None,
         timeout: float = 8.0,
         region: str | None = None,
+        rate_limiter: TokenBucket | None = None,
     ) -> None:
         self._api_key = api_key if api_key is not None else os.environ.get(
             "CIA_SERPER_API_KEY", ""
@@ -339,12 +385,15 @@ class SerperSearch:
         # query language if omitted, but explicit pinning makes the
         # tier-1 result set more predictable for CJK queries.
         self._region = region
+        self._rate_limiter = rate_limiter
 
     def search(self, query: str, limit: int = 5) -> list[dict]:
         if not self._api_key:
             # Quietly inert — the fallback chain falls through to
             # HTML adapters so existing key-less setups still work.
             return []
+        if self._rate_limiter is not None:
+            self._rate_limiter.acquire()
         region = self._region or ("cn" if _contains_cjk(query) else "us")
         language = "zh-cn" if region == "cn" else "en"
         payload = {
@@ -360,30 +409,40 @@ class SerperSearch:
                 payload=payload,
                 timeout=self._timeout,
             )
-        except (urllib_error.HTTPError, urllib_error.URLError, OSError, TimeoutError) as exc:
-            import sys
-
-            print(
-                f"[serper] query={query[:50]!r} results=0 error={exc}",
-                file=sys.stderr,
+        except urllib_error.HTTPError as exc:
+            # 429 from Serper: respect the rate limit. The fallback
+            # chain will move on to HTML adapters without retrying
+            # Serper for the rest of this run's penalty window.
+            if exc.code == 429 and self._rate_limiter is not None:
+                self._rate_limiter.penalize()
+            logger.warning(
+                "serper request failed",
+                extra={
+                    "engine": "serper",
+                    "query": query[:50],
+                    "http_code": exc.code,
+                    "error": str(exc),
+                },
+            )
+            return []
+        except (urllib_error.URLError, OSError, TimeoutError) as exc:
+            logger.warning(
+                "serper transport error",
+                extra={"engine": "serper", "query": query[:50], "error": str(exc)},
             )
             return []
         except json.JSONDecodeError as exc:
-            import sys
-
-            print(
-                f"[serper] query={query[:50]!r} results=0 invalid_json={exc}",
-                file=sys.stderr,
+            logger.warning(
+                "serper returned invalid json",
+                extra={"engine": "serper", "query": query[:50], "error": str(exc)},
             )
             return []
 
         organic = raw.get("organic") if isinstance(raw, dict) else None
         if not isinstance(organic, list):
-            import sys
-
-            print(
-                f"[serper] query={query[:50]!r} results=0 no_organic_key",
-                file=sys.stderr,
+            logger.warning(
+                "serper response missing organic key",
+                extra={"engine": "serper", "query": query[:50]},
             )
             return []
         results: list[dict] = []
@@ -402,9 +461,11 @@ class SerperSearch:
 class FallbackSearch:
     """Merge results from all search adapters, then deduplicate and rank.
 
-    Queries every adapter (with a small delay between them) and merges
-    results so the collector gets a diverse candidate pool instead of
-    being locked into a single engine's ranking bias.
+    Each adapter is responsible for its own rate limiting (via an
+    injected :class:`TokenBucket`), so this class no longer inserts a
+    ``time.sleep`` between adapters — the previous random-jitter delay
+    was a coarse stand-in for the per-engine throttling that now lives
+    inside each adapter.
     """
 
     def __init__(self, adapters: list[SearchAdapter]) -> None:
@@ -414,16 +475,16 @@ class FallbackSearch:
         all_results: list[dict] = []
         seen_urls: set[str] = set()
         for adapter in self._adapters:
-            time.sleep(random.uniform(0.3, 0.8))
             try:
                 results = adapter.search(query, limit=limit)
             except Exception as exc:
-                import sys
-
-                print(
-                    f"[search] adapter={adapter.__class__.__name__} "
-                    f"query={query[:50]!r} error={exc}",
-                    file=sys.stderr,
+                logger.warning(
+                    "search adapter raised",
+                    extra={
+                        "adapter": adapter.__class__.__name__,
+                        "query": query[:50],
+                        "error": str(exc),
+                    },
                 )
                 continue
             engine_name = adapter.__class__.__name__
@@ -446,9 +507,29 @@ class FallbackSearch:
         return _interleave(all_results, limit)
 
 
+def _default_search_rate_limiters() -> dict[str, TokenBucket]:
+    """Per-engine token buckets used by ``make_default_search_adapter``.
+
+    Rates are tuned conservatively for unauthenticated public endpoints:
+    DuckDuckGo tolerates roughly 1 rps before its bot wall kicks in,
+    Bing/Baidu/Sogou are stricter so cap at 0.5 rps. Serper has a
+    documented per-second quota but the API limits via 429 — the
+    bucket is mainly here so ``penalize`` has a place to land when a
+    429 happens.
+    """
+    return {
+        "ddg": TokenBucket(rate_per_sec=1.0, burst=2),
+        "bing": TokenBucket(rate_per_sec=0.5, burst=1),
+        "baidu": TokenBucket(rate_per_sec=0.5, burst=1),
+        "sogou": TokenBucket(rate_per_sec=0.5, burst=1),
+        "serper": TokenBucket(rate_per_sec=10.0, burst=5),
+    }
+
+
 def make_default_search_adapter(
     provider: str | None = None,
     serper_api_key: str | None = None,
+    rate_limiters: dict[str, TokenBucket] | None = None,
 ) -> SearchAdapter:
     """Build the default ``SearchAdapter`` for the orchestrator.
 
@@ -465,6 +546,12 @@ def make_default_search_adapter(
     exhausted or the key gets revoked. Serper sits in front because
     its results are the most stable and don't depend on regex parsing
     of any HTML page.
+
+    Each adapter receives a per-engine ``TokenBucket`` so a noisy
+    adapter cannot DoS the others. ``rate_limiters`` lets tests
+    inject deterministic buckets; production callers should leave it
+    ``None`` to get the safe defaults from
+    :func:`_default_search_rate_limiters`.
     """
     chosen = (provider or os.environ.get("CIA_SEARCH_PROVIDER", "")).strip().lower() or "auto"
     api_key = (
@@ -472,6 +559,7 @@ def make_default_search_adapter(
         if serper_api_key is not None
         else os.environ.get("CIA_SERPER_API_KEY", "").strip()
     )
+    limiters = rate_limiters if rate_limiters is not None else _default_search_rate_limiters()
 
     # Build adapters lazily per branch.  ``BingSearch()`` instantiates
     # ``BrowserHttpClient`` which imports ``curl_cffi`` at __init__
@@ -480,18 +568,34 @@ def make_default_search_adapter(
     # not installed the optional binary dependency. The branches below
     # only build the adapters they actually return.
     if chosen == "html":
-        return FallbackSearch([DuckDuckGoSearch(timeout=8), BingSearch()])
+        return FallbackSearch(
+            [
+                DuckDuckGoSearch(timeout=8, rate_limiter=limiters.get("ddg")),
+                BingSearch(rate_limiter=limiters.get("bing")),
+            ]
+        )
     if chosen == "serper":
         # Serper-only mode is opt-in for tightly-budgeted quotas where
         # HTML fallback shouldn't kick in even on Serper failure.
-        return FallbackSearch([SerperSearch(api_key=api_key)])
+        return FallbackSearch(
+            [SerperSearch(api_key=api_key, rate_limiter=limiters.get("serper"))]
+        )
     # "auto" (default): prefer Serper when keyed; otherwise behave
     # exactly as before — HTML adapters only.
     if api_key:
         return FallbackSearch(
-            [SerperSearch(api_key=api_key), DuckDuckGoSearch(timeout=8), BingSearch()]
+            [
+                SerperSearch(api_key=api_key, rate_limiter=limiters.get("serper")),
+                DuckDuckGoSearch(timeout=8, rate_limiter=limiters.get("ddg")),
+                BingSearch(rate_limiter=limiters.get("bing")),
+            ]
         )
-    return FallbackSearch([DuckDuckGoSearch(timeout=8), BingSearch()])
+    return FallbackSearch(
+        [
+            DuckDuckGoSearch(timeout=8, rate_limiter=limiters.get("ddg")),
+            BingSearch(rate_limiter=limiters.get("bing")),
+        ]
+    )
 
 
 class WebSearchTool:
@@ -526,16 +630,41 @@ class WebFetchTool:
         http_client: HttpClient | None = None,
         timeout: float = 10.0,
         max_chars: int | None = 2000,
+        domain_rate_limiters: dict[str, TokenBucket] | None = None,
+        default_domain_rate: float = 0.5,
     ) -> None:
         self._http_client = http_client or HttpClient()
         self._timeout = timeout
         self._max_chars = max_chars
+        # Pre-seeded buckets the caller wants pinned to specific rates
+        # (e.g. faster/slower than the default). Per-domain buckets for
+        # any other host are created on demand the first time we see
+        # the host, so each unique domain ends up with its own bucket.
+        self._domain_limiters: dict[str, TokenBucket] = (
+            dict(domain_rate_limiters) if domain_rate_limiters else {}
+        )
+        self._default_domain_rate = default_domain_rate
+
+    def _limiter_for(self, host: str) -> TokenBucket:
+        bucket = self._domain_limiters.get(host)
+        if bucket is None:
+            bucket = TokenBucket(rate_per_sec=self._default_domain_rate, burst=1)
+            self._domain_limiters[host] = bucket
+        return bucket
 
     def run(self, args: dict) -> dict:
         url = str(args.get("url", "")).strip()
         if not url:
             raise ValueError("url is required")
-        html_text = self._http_client.get_text(url, timeout=self._timeout)
+        host = parse.urlparse(url).hostname or ""
+        if host:
+            self._limiter_for(host).acquire()
+        try:
+            html_text = self._http_client.get_text(url, timeout=self._timeout)
+        except Exception as exc:
+            if host and _looks_like_429(str(exc)):
+                self._limiter_for(host).penalize()
+            raise
         content = _clean_html_text(html_text)
         if self._max_chars is not None:
             content = content[: self._max_chars]
