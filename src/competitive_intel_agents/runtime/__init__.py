@@ -27,9 +27,11 @@ from competitive_intel_agents.runtime.web_tools import (
     DuckDuckGoSearch,
     FallbackSearch,
     HttpClient,
+    SerperSearch,
     SogouSearch,
     WebFetchTool,
     WebSearchTool,
+    make_default_search_adapter,
 )
 
 __all__ = [
@@ -51,9 +53,11 @@ __all__ = [
     "ModelRuntime",
     "PersistedContentTool",
     "Provider",
+    "SerperSearch",
     "SogouSearch",
     "ToolPolicy",
     "ToolRuntime",
     "WebFetchTool",
     "WebSearchTool",
+    "make_default_search_adapter",
 ]

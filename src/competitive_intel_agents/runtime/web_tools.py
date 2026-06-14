@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import os
 import random
 import re
 import ssl
@@ -12,7 +13,7 @@ import time
 import base64
 from pathlib import Path
 from typing import Callable, Protocol
-from urllib import parse, request as urllib_request
+from urllib import error as urllib_error, parse, request as urllib_request
 
 
 def _get_ssl_context() -> ssl.SSLContext:
@@ -281,6 +282,123 @@ class SogouSearch:
         return results
 
 
+class SerperJsonTransport:
+    """Minimal POST+JSON client for the Serper.dev search API.
+
+    Kept separate from ``HttpClient`` (GET) and ``BrowserHttpClient``
+    (TLS-fingerprinted GET via curl_cffi) because Serper expects a
+    plain HTTPS POST with an ``X-API-KEY`` header — no browser
+    impersonation needed and no HTML parsing involved.
+    """
+
+    def __init__(self) -> None:
+        self._ssl_context = _get_ssl_context()
+
+    def post_json(
+        self,
+        url: str,
+        headers: dict[str, str],
+        payload: dict,
+        timeout: float,
+    ) -> dict:
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib_request.Request(
+            url,
+            data=body,
+            headers={"Content-Type": "application/json", **headers},
+            method="POST",
+        )
+        with urllib_request.urlopen(req, timeout=timeout, context=self._ssl_context) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+
+class SerperSearch:
+    """Serper.dev API adapter — Google results without HTML scraping.
+
+    Reads ``CIA_SERPER_API_KEY`` from the environment if no key is
+    passed explicitly. When the key is missing the adapter is inert
+    (returns ``[]``) so it can sit at the front of a fallback chain
+    without breaking unauthenticated runs.
+    """
+
+    SERPER_ENDPOINT = "https://google.serper.dev/search"
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        transport: SerperJsonTransport | None = None,
+        timeout: float = 8.0,
+        region: str | None = None,
+    ) -> None:
+        self._api_key = api_key if api_key is not None else os.environ.get(
+            "CIA_SERPER_API_KEY", ""
+        ).strip()
+        self._transport = transport or SerperJsonTransport()
+        self._timeout = timeout
+        # Region pinning is optional — Serper auto-detects from the
+        # query language if omitted, but explicit pinning makes the
+        # tier-1 result set more predictable for CJK queries.
+        self._region = region
+
+    def search(self, query: str, limit: int = 5) -> list[dict]:
+        if not self._api_key:
+            # Quietly inert — the fallback chain falls through to
+            # HTML adapters so existing key-less setups still work.
+            return []
+        region = self._region or ("cn" if _contains_cjk(query) else "us")
+        language = "zh-cn" if region == "cn" else "en"
+        payload = {
+            "q": query,
+            "num": max(1, min(limit, 10)),
+            "gl": region,
+            "hl": language,
+        }
+        try:
+            raw = self._transport.post_json(
+                self.SERPER_ENDPOINT,
+                headers={"X-API-KEY": self._api_key},
+                payload=payload,
+                timeout=self._timeout,
+            )
+        except (urllib_error.HTTPError, urllib_error.URLError, OSError, TimeoutError) as exc:
+            import sys
+
+            print(
+                f"[serper] query={query[:50]!r} results=0 error={exc}",
+                file=sys.stderr,
+            )
+            return []
+        except json.JSONDecodeError as exc:
+            import sys
+
+            print(
+                f"[serper] query={query[:50]!r} results=0 invalid_json={exc}",
+                file=sys.stderr,
+            )
+            return []
+
+        organic = raw.get("organic") if isinstance(raw, dict) else None
+        if not isinstance(organic, list):
+            import sys
+
+            print(
+                f"[serper] query={query[:50]!r} results=0 no_organic_key",
+                file=sys.stderr,
+            )
+            return []
+        results: list[dict] = []
+        for item in organic[:limit]:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("link", "")).strip()
+            title = str(item.get("title", "")).strip()
+            snippet = str(item.get("snippet", "")).strip()
+            if not url or not title:
+                continue
+            results.append({"url": url, "title": title, "snippet": snippet})
+        return results
+
+
 class FallbackSearch:
     """Merge results from all search adapters, then deduplicate and rank.
 
@@ -326,6 +444,54 @@ class FallbackSearch:
         # aren't dominated by a single engine.  Round-robin by original
         # position within each engine's result list.
         return _interleave(all_results, limit)
+
+
+def make_default_search_adapter(
+    provider: str | None = None,
+    serper_api_key: str | None = None,
+) -> SearchAdapter:
+    """Build the default ``SearchAdapter`` for the orchestrator.
+
+    Resolution order:
+
+    - ``provider`` argument (``"serper"`` / ``"html"`` / ``"auto"``) wins
+      if passed
+    - else ``CIA_SEARCH_PROVIDER`` env var
+    - else ``"auto"`` — picks Serper-led fallback when a key is
+      available, pure-HTML fallback otherwise
+
+    The HTML adapters stay in the chain even when Serper is the
+    primary so the tool keeps producing results when the API quota is
+    exhausted or the key gets revoked. Serper sits in front because
+    its results are the most stable and don't depend on regex parsing
+    of any HTML page.
+    """
+    chosen = (provider or os.environ.get("CIA_SEARCH_PROVIDER", "")).strip().lower() or "auto"
+    api_key = (
+        serper_api_key
+        if serper_api_key is not None
+        else os.environ.get("CIA_SERPER_API_KEY", "").strip()
+    )
+
+    # Build adapters lazily per branch.  ``BingSearch()`` instantiates
+    # ``BrowserHttpClient`` which imports ``curl_cffi`` at __init__
+    # time, so eagerly constructing it for every branch would raise
+    # ``ImportError`` on hosts that only need the Serper path and have
+    # not installed the optional binary dependency. The branches below
+    # only build the adapters they actually return.
+    if chosen == "html":
+        return FallbackSearch([DuckDuckGoSearch(timeout=8), BingSearch()])
+    if chosen == "serper":
+        # Serper-only mode is opt-in for tightly-budgeted quotas where
+        # HTML fallback shouldn't kick in even on Serper failure.
+        return FallbackSearch([SerperSearch(api_key=api_key)])
+    # "auto" (default): prefer Serper when keyed; otherwise behave
+    # exactly as before — HTML adapters only.
+    if api_key:
+        return FallbackSearch(
+            [SerperSearch(api_key=api_key), DuckDuckGoSearch(timeout=8), BingSearch()]
+        )
+    return FallbackSearch([DuckDuckGoSearch(timeout=8), BingSearch()])
 
 
 class WebSearchTool:

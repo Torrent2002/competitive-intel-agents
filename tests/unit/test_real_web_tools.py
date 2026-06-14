@@ -8,8 +8,10 @@ from competitive_intel_agents.runtime import (
     FallbackSearch,
     DuckDuckGoSearch,
     HttpClient,
+    SerperSearch,
     WebFetchTool,
     WebSearchTool,
+    make_default_search_adapter,
 )
 
 
@@ -244,3 +246,151 @@ def test_http_client_reports_fetch_errors() -> None:
         assert "failed to fetch" in str(exc)
     else:
         raise AssertionError("expected fetch failure")
+
+
+# ── Serper search adapter (Module 34) ──────────────────────────
+
+
+class StubSerperTransport:
+    """Records requests and returns canned responses."""
+
+    def __init__(self, response: dict | Exception) -> None:
+        self.response = response
+        self.calls: list[dict] = []
+
+    def post_json(self, url: str, headers: dict, payload: dict, timeout: float) -> dict:
+        self.calls.append({"url": url, "headers": dict(headers), "payload": dict(payload)})
+        if isinstance(self.response, Exception):
+            raise self.response
+        return self.response
+
+
+def test_serper_search_parses_organic_results() -> None:
+    transport = StubSerperTransport(
+        {
+            "organic": [
+                {
+                    "title": "Notion pricing — official",
+                    "link": "https://www.notion.so/pricing",
+                    "snippet": "Plans for individuals and teams.",
+                },
+                {
+                    "title": "Notion vs Coda comparison",
+                    "link": "https://example.com/compare",
+                    "snippet": "Feature-by-feature comparison.",
+                },
+            ]
+        }
+    )
+    adapter = SerperSearch(api_key="test-key", transport=transport)
+
+    results = adapter.search("Notion pricing", limit=5)
+
+    assert results == [
+        {
+            "url": "https://www.notion.so/pricing",
+            "title": "Notion pricing — official",
+            "snippet": "Plans for individuals and teams.",
+        },
+        {
+            "url": "https://example.com/compare",
+            "title": "Notion vs Coda comparison",
+            "snippet": "Feature-by-feature comparison.",
+        },
+    ]
+    assert transport.calls[0]["headers"]["X-API-KEY"] == "test-key"
+    assert transport.calls[0]["payload"]["q"] == "Notion pricing"
+
+
+def test_serper_search_returns_empty_on_transport_error() -> None:
+    transport = StubSerperTransport(OSError("connection reset"))
+    adapter = SerperSearch(api_key="test-key", transport=transport)
+
+    results = adapter.search("anything", limit=5)
+
+    assert results == []
+
+
+def test_serper_search_is_inert_without_api_key() -> None:
+    """Without an API key the adapter should be silently empty so it
+    can sit at the head of a fallback chain in unauthenticated runs."""
+    transport = StubSerperTransport({"organic": [{"title": "ignored", "link": "https://x"}]})
+    adapter = SerperSearch(api_key="", transport=transport)
+
+    results = adapter.search("anything", limit=5)
+
+    assert results == []
+    # No request should have been issued either — keyless mode skips
+    # the network call entirely instead of getting a 401 back.
+    assert transport.calls == []
+
+
+def test_make_default_search_adapter_prefers_serper_when_keyed(monkeypatch) -> None:
+    monkeypatch.delenv("CIA_SEARCH_PROVIDER", raising=False)
+    monkeypatch.setenv("CIA_SERPER_API_KEY", "live-key")
+    # BingSearch() default-constructs BrowserHttpClient which imports
+    # curl_cffi — not always present in local CI. Stub it out.
+    _stub_browser_client(monkeypatch)
+
+    adapter = make_default_search_adapter()
+
+    assert isinstance(adapter, FallbackSearch)
+    assert isinstance(adapter._adapters[0], SerperSearch)
+    # HTML fallbacks remain in the chain.
+    assert any(isinstance(a, DuckDuckGoSearch) for a in adapter._adapters)
+
+
+def test_make_default_search_adapter_keyless_keeps_html_only(monkeypatch) -> None:
+    monkeypatch.delenv("CIA_SEARCH_PROVIDER", raising=False)
+    monkeypatch.delenv("CIA_SERPER_API_KEY", raising=False)
+    _stub_browser_client(monkeypatch)
+
+    adapter = make_default_search_adapter()
+
+    assert isinstance(adapter, FallbackSearch)
+    # No SerperSearch in the chain when there is no key — preserves
+    # the prior keyless behavior exactly.
+    assert not any(isinstance(a, SerperSearch) for a in adapter._adapters)
+    assert any(isinstance(a, DuckDuckGoSearch) for a in adapter._adapters)
+
+
+def test_make_default_search_adapter_serper_only_does_not_import_curl_cffi(
+    monkeypatch,
+) -> None:
+    """``provider="serper"`` must build the chain WITHOUT touching
+    BingSearch — otherwise hosts that only need the API path can't run
+    the factory unless they also install ``curl_cffi``. Regression test
+    for the eager-construction bug that crashed run_3dc810266d52."""
+
+    # Make BrowserHttpClient explosive: any attempt to instantiate it
+    # raises, simulating a host without curl_cffi installed. We do NOT
+    # call _stub_browser_client here — the point is to prove the
+    # serper-only path never reaches BrowserHttpClient.
+    class _Explodes:
+        def __init__(self, *a, **kw):
+            raise ImportError("simulated: curl_cffi not installed")
+
+    import competitive_intel_agents.runtime.web_tools as wt
+
+    monkeypatch.setattr(wt, "BrowserHttpClient", _Explodes)
+    monkeypatch.delenv("CIA_SEARCH_PROVIDER", raising=False)
+    monkeypatch.setenv("CIA_SERPER_API_KEY", "live-key")
+
+    adapter = make_default_search_adapter(provider="serper")
+
+    assert isinstance(adapter, FallbackSearch)
+    assert len(adapter._adapters) == 1
+    assert isinstance(adapter._adapters[0], SerperSearch)
+
+
+def _stub_browser_client(monkeypatch) -> None:
+    """Replace BrowserHttpClient with a no-op so its curl_cffi import
+    doesn't fire when BingSearch() is default-constructed in tests."""
+
+    class _Inert:
+        def get_text(self, url: str, timeout: float = 10.0, headers: dict | None = None) -> str:
+            return ""
+
+    import competitive_intel_agents.runtime.web_tools as wt
+
+    monkeypatch.setattr(wt, "BrowserHttpClient", _Inert)

@@ -5,11 +5,31 @@ from __future__ import annotations
 import json
 import os
 import ssl
+import time
 from urllib import error, request as urlrequest
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from competitive_intel_agents.models import ModelRequest, ModelResponse
+
+
+class ProviderError(RuntimeError):
+    """Base class for provider-side request failures."""
+
+
+class RetryableProviderError(ProviderError):
+    """Transient failure — caller may retry after backoff.
+
+    Covers HTTP 408/425/429/5xx, network/IO errors, and JSON decode
+    failures (which are usually truncated bodies from a flaky upstream).
+    """
+
+
+class NonRetryableProviderError(ProviderError):
+    """Permanent failure — retrying will not help (e.g. 4xx auth/format)."""
+
+
+_RETRYABLE_HTTP_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
 
 
 def _build_ssl_context() -> ssl.SSLContext:
@@ -101,8 +121,29 @@ class JsonPostTransport:
         try:
             with urlrequest.urlopen(req, timeout=timeout, context=self._ssl_context) as response:
                 return json.loads(response.read().decode("utf-8"))
-        except (error.URLError, error.HTTPError, OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"model provider request failed: {exc}") from exc
+        except error.HTTPError as exc:
+            # 4xx (except a few transient codes) is the caller's fault
+            # — auth, malformed payload, missing model. Retrying will
+            # produce the same failure, so surface it as non-retryable.
+            if exc.code in _RETRYABLE_HTTP_CODES:
+                raise RetryableProviderError(
+                    f"model provider request failed: HTTP {exc.code} {exc.reason}"
+                ) from exc
+            raise NonRetryableProviderError(
+                f"model provider request failed: HTTP {exc.code} {exc.reason}"
+            ) from exc
+        except (error.URLError, OSError, TimeoutError) as exc:
+            # Network unreachable, DNS, connection reset, read timeout —
+            # all worth a retry.
+            raise RetryableProviderError(
+                f"model provider request failed: {exc}"
+            ) from exc
+        except json.JSONDecodeError as exc:
+            # A truncated or partial body usually means the upstream
+            # closed the connection mid-stream. Treat as transient.
+            raise RetryableProviderError(
+                f"model provider request failed: invalid JSON: {exc}"
+            ) from exc
 
 
 class AnthropicMessagesProvider:
@@ -310,20 +351,61 @@ class ConfiguredProviderFactory:
 
 
 class ModelRuntime:
-    """Normalize model calls through a provider, with optional structured parsing."""
+    """Normalize model calls through a provider, with optional structured parsing.
 
-    def __init__(self, provider: Provider | None = None) -> None:
+    Retries transient provider failures with exponential backoff (1s, 2s,
+    4s, capped at ``backoff_max``). 4xx-style failures from the provider
+    are not retried because the request itself is wrong — retrying would
+    waste budget and surface the same error.
+
+    The ``sleep`` callback is injectable so tests can drive the retry
+    loop without burning real wall clock.
+    """
+
+    def __init__(
+        self,
+        provider: Provider | None = None,
+        max_retries: int = 3,
+        backoff_base: float = 1.0,
+        backoff_max: float = 8.0,
+        sleep: Callable[[float], None] | None = None,
+    ) -> None:
         self._provider = provider or FakeModelProvider()
+        self._max_retries = max(0, max_retries)
+        self._backoff_base = backoff_base
+        self._backoff_max = backoff_max
+        self._sleep = sleep or time.sleep
 
     def complete(self, request: ModelRequest) -> ModelResponse:
-        # Call the provider — catch any exception so the harness never crashes
-        try:
-            raw = self._provider.complete(request)
-        except Exception as exc:
-            return ModelResponse(
-                ok=False,
-                error=str(exc),
-            )
+        # Call the provider — catch any exception so the harness never crashes.
+        # Retry transient failures (network blip, 429, 5xx) with exponential
+        # backoff. Non-retryable errors (4xx auth/format, unknown exceptions
+        # raised by custom providers) fail immediately so we don't burn budget
+        # repeating a doomed request.
+        attempt = 0
+        last_error: str | None = None
+        while True:
+            try:
+                raw = self._provider.complete(request)
+                break
+            except RetryableProviderError as exc:
+                last_error = str(exc)
+                if attempt >= self._max_retries:
+                    return ModelResponse(ok=False, error=last_error)
+                delay = min(
+                    self._backoff_base * (2 ** attempt),
+                    self._backoff_max,
+                )
+                self._sleep(delay)
+                attempt += 1
+                continue
+            except NonRetryableProviderError as exc:
+                return ModelResponse(ok=False, error=str(exc))
+            except Exception as exc:
+                # Catch-all for custom providers that raise plain
+                # RuntimeError or anything else — surface the message but
+                # don't retry, because we can't classify intent.
+                return ModelResponse(ok=False, error=str(exc))
 
         ok = raw.get("ok", False)
         content = raw.get("content", "")

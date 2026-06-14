@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import uuid
 from pathlib import Path
 from typing import Callable, Protocol
@@ -62,6 +63,8 @@ class Orchestrator:
         max_rework_attempts: int = 2,
         model_runtime: ModelRuntime | None = None,
         conversation_store: ConversationStore | None = None,
+        max_wall_time: float | None = 600.0,
+        time_provider: Callable[[], float] | None = None,
     ) -> None:
         self.artifacts = artifacts or InMemoryArtifactStore()
         self.journal = journal or InMemoryJournalStore()
@@ -76,6 +79,12 @@ class Orchestrator:
         if model_runtime is not None:
             self._runtimes_by_agent["_default"] = model_runtime
         self.last_context: RunContext | None = None
+        # Wall-clock budget for the whole run. None disables the
+        # deadline (used by the existing harness-driven unit tests that
+        # don't need to model time).
+        self._max_wall_time = max_wall_time
+        self._time_provider = time_provider or time.monotonic
+        self._deadline: float | None = None
 
     def run(self, request: CompetitiveIntelRequest) -> RunResult:
         context = RunContext(
@@ -84,8 +93,20 @@ class Orchestrator:
             agent_profiles=self._agent_profiles,
         )
         self.last_context = context
+        # Arm the global deadline. Checked between agent boundaries and
+        # at the top of every rework iteration — the harness round loop
+        # is intentionally not instrumented because per-round checks
+        # would burn budget on the deterministic fixture path with no
+        # added safety value.
+        if self._max_wall_time is not None:
+            self._deadline = self._time_provider() + self._max_wall_time
+        else:
+            self._deadline = None
 
         for agent in self._build_agents():
+            timeout_result = self._timeout_result_if_due(context)
+            if timeout_result is not None:
+                return timeout_result
             result = self._harness.run_agent(context, agent)
             if result.decision == "abort":
                 return RunResult(
@@ -115,7 +136,31 @@ class Orchestrator:
                         report_id=self._latest_report_id(context.run_id),
                         review_feedback=[feedback],
                     )
+            if agent.name == "reviewer" and result.decision == "stop":
+                # Reviewer can ship the report while still attaching
+                # non-blocking advisories (e.g. claim cross-check
+                # verdicts marking an unsupported claim, see
+                # [[35-claim-source-cross-check]]). Surface those as
+                # caveats alongside the approved run so users see them
+                # without forcing another rework loop.
+                advisories = [
+                    fb for fb in result.review_feedback if not fb.blocking
+                ]
+                if advisories:
+                    timeout_result = self._timeout_result_if_due(context)
+                    if timeout_result is not None:
+                        return timeout_result
+                    return RunResult(
+                        run_id=context.run_id,
+                        status="approved_with_caveats",
+                        report_id=self._latest_report_id(context.run_id),
+                        review_feedback=[],
+                        caveats=advisories,
+                    )
 
+        timeout_result = self._timeout_result_if_due(context)
+        if timeout_result is not None:
+            return timeout_result
         return RunResult(
             run_id=context.run_id,
             status="approved",
@@ -145,6 +190,9 @@ class Orchestrator:
         # _max_attempts default is 2; an outer "seen once → stalemate"
         # gate would cap it at 1).
         for _ in range(self._max_rework_attempts):
+            timeout_result = self._timeout_result_if_due(context)
+            if timeout_result is not None:
+                return timeout_result
             if not remaining_feedback:
                 break
             selected_feedback = self._select_upstream_feedback(remaining_feedback)
@@ -169,21 +217,13 @@ class Orchestrator:
                     error=rework_result.status,
                 )
             if rework_result.final_decision == "stop":
-                return RunResult(
-                    run_id=context.run_id,
-                    status="approved",
-                    report_id=self._latest_report_id(context.run_id),
-                )
+                return self._approved_or_caveats_from_reviewer(context)
             latest_reviewer = self.journal.list_agent_events(
                 context.run_id,
                 "reviewer",
             )[-1:]
             if latest_reviewer and latest_reviewer[0].decision == "stop":
-                return RunResult(
-                    run_id=context.run_id,
-                    status="approved",
-                    report_id=self._latest_report_id(context.run_id),
-                )
+                return self._approved_or_caveats_from_reviewer(context)
             if latest_reviewer and latest_reviewer[0].review_feedback:
                 remaining_feedback = latest_reviewer[0].review_feedback
         report_id = self._latest_report_id(context.run_id)
@@ -215,6 +255,83 @@ class Orchestrator:
                 if feedback.target_agent == agent:
                     return feedback
         return feedback_items[0]
+
+    def _approved_or_caveats_from_reviewer(self, context: RunContext) -> RunResult:
+        """Build the success-path RunResult from the latest reviewer event.
+
+        If reviewer stopped with advisory (non-blocking) feedback —
+        e.g. ``unsupported_claim`` from the cross-check pass — the run
+        ships as ``approved_with_caveats`` so the user sees those
+        concerns alongside the report instead of a clean ``approved``.
+        """
+        report_id = self._latest_report_id(context.run_id)
+        latest_reviewer = self.journal.list_agent_events(
+            context.run_id, "reviewer",
+        )[-1:]
+        advisories: list[ReviewFeedback] = []
+        if latest_reviewer:
+            advisories = [
+                fb for fb in latest_reviewer[0].review_feedback if not fb.blocking
+            ]
+        if advisories:
+            return RunResult(
+                run_id=context.run_id,
+                status="approved_with_caveats",
+                report_id=report_id,
+                review_feedback=[],
+                caveats=advisories,
+            )
+        return RunResult(
+            run_id=context.run_id,
+            status="approved",
+            report_id=report_id,
+        )
+
+    def _timeout_result_if_due(self, context: RunContext) -> RunResult | None:
+        """Return a timeout RunResult if the wall-clock deadline has passed.
+
+        If a deliverable report already exists, classify the timeout as
+        ``approved_with_caveats`` with a synthetic timeout caveat — the
+        partial work is still useful and we want it surfaced rather than
+        thrown away. With no report there's nothing to ship, so fall
+        back to ``aborted``. Returns ``None`` when the deadline is
+        unset or not yet reached.
+        """
+        if self._deadline is None:
+            return None
+        if self._time_provider() < self._deadline:
+            return None
+        report_id = self._latest_report_id(context.run_id)
+        timeout_caveat = ReviewFeedback(
+            issue="format_violation",
+            target_agent="reviewer",
+            target_artifact_id=f"run_{context.run_id}_deadline",
+            message=(
+                "Run exceeded the configured wall-clock budget "
+                f"({self._max_wall_time:.0f}s). Some agents may not have completed."
+            ),
+            required_action=(
+                "Review remaining gaps; rerun with a larger max_wall_time "
+                "if deeper coverage is needed."
+            ),
+            severity="advisory",
+            blocking=False,
+        )
+        if report_id is not None:
+            return RunResult(
+                run_id=context.run_id,
+                status="approved_with_caveats",
+                report_id=report_id,
+                review_feedback=[],
+                caveats=[timeout_caveat],
+                error="global_timeout",
+            )
+        return RunResult(
+            run_id=context.run_id,
+            status="aborted",
+            report_id=None,
+            error="global_timeout",
+        )
 
     @staticmethod
     def _status_for_unresolved_feedback(

@@ -30,6 +30,22 @@ VALID_REVIEW_ISSUES = {
     "format_violation",
     "missing_section",
 }
+VALID_CLAIM_ACCURACY = {
+    # Claim has not been cross-checked against its source content yet.
+    # All freshly-saved claims start in this state and stay here when
+    # the reviewer can't run (no model_runtime, source content_ref
+    # missing, etc.).
+    "unverified",
+    # The source text directly supports the claim.
+    "supported",
+    # Source text partially supports the claim — quoted but with caveats
+    # or missing context. Surfaced to readers as a soft warning.
+    "partial",
+    # Source text contradicts or fails to back the claim. Triggers a
+    # non-blocking advisory feedback so the report ships through
+    # ``approved_with_caveats`` rather than failing.
+    "unsupported",
+}
 
 T = TypeVar("T", bound="SerializableModel")
 
@@ -298,12 +314,18 @@ class AnalysisClaim(VersionedArtifact):
     source_ids: list[str] = field(default_factory=list)
     confidence: str = "medium"
     reasoning: str = ""
+    # Accuracy of the claim relative to its sources, as judged by the
+    # reviewer's ``_verify_claim_support`` cross-check. Defaults to
+    # ``unverified`` so analyst output is unaffected; reviewer rewrites
+    # this in a v2 of the claim once it has run the LLM check.
+    accuracy: str = "unverified"
 
     def __post_init__(self) -> None:
         super().__post_init__()
         require_non_empty(self.text, "text")
         if not self.source_ids:
             raise ValueError("source_ids must contain at least one source id")
+        require_choice(self.accuracy, VALID_CLAIM_ACCURACY, "accuracy")
 
 
 @dataclass(frozen=True)

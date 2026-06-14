@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from competitive_intel_agents.agents.base import BaseAgent
 from competitive_intel_agents.agents.prompt_context import (
+    _content_excerpt,
     coverage_payload,
     claims_map_payload,
     report_payload,
@@ -84,6 +87,7 @@ class ReviewerAgent(BaseAgent):
         # by _model_review — skip the rule-based keyword matcher to avoid
         # false positives from literal matching.
         model_feedback: list[ReviewFeedback] = []
+        verification_feedback: list[ReviewFeedback] = []
         if self._model_runtime is not None:
             model_feedback = self._model_review(report, claims, sources, context)
             # Remove rule-based question coverage false positives when LLM
@@ -93,9 +97,21 @@ class ReviewerAgent(BaseAgent):
                 if not (fb.issue == "missing_source"
                         and fb.target_artifact_id.startswith("question_coverage:"))
             ]
+            # Cross-check every claim against its source content.
+            # Failed verifications become non-blocking advisories so the
+            # report still ships through approved_with_caveats —
+            # see [[35-claim-source-cross-check]].
+            verification_feedback = self._verify_claim_support(claims, sources, context)
 
-        all_feedback = _unique_feedback(rule_feedback + model_feedback)
-        if all_feedback:
+        all_feedback = _unique_feedback(rule_feedback + model_feedback + verification_feedback)
+        # Advisory feedback (e.g. cross-check verdicts of "unsupported")
+        # is informational — the run should still ship rather than
+        # bouncing back through rework. Only blocking items trigger the
+        # rework path; advisories are bundled into review_feedback so
+        # the orchestrator's approved_with_caveats branch can surface
+        # them next to the report.
+        blocking_feedback = [fb for fb in all_feedback if fb.blocking]
+        if blocking_feedback:
             return AgentRoundResult(
                 completed=False,
                 signals=["rework_required"],
@@ -106,6 +122,7 @@ class ReviewerAgent(BaseAgent):
             completed=True,
             output_artifact_ids=[report.id],
             signals=["approved"],
+            review_feedback=all_feedback,
         )
 
     def _model_review(
@@ -228,6 +245,179 @@ class ReviewerAgent(BaseAgent):
         for event in self._journal.list_agent_events(context.run_id, "reviewer"):
             feedback.extend(event.review_feedback)
         return feedback
+
+    def _verify_claim_support(
+        self,
+        claims: dict[str, AnalysisClaim],
+        sources: dict[str, SourceArtifact],
+        context: RunContext,
+    ) -> list[ReviewFeedback]:
+        """Cross-check every claim against its source content.
+
+        Sends a single batched prompt asking the model to label each
+        claim as supported / partial / unsupported, then:
+
+        - rewrites unsupported / partial claims to a v2 carrying the
+          new ``accuracy`` value (lineage chain via ``supersedes_id``).
+          Supported and unverified claims are left alone — version
+          bumps for "everything's fine" would just bloat the store.
+        - emits one ``unsupported_claim`` advisory per failed claim.
+          ``blocking=False`` so the orchestrator's
+          ``approved_with_caveats`` path picks them up rather than
+          forcing another rework loop. See [[35-claim-source-cross-check]].
+
+        Failures (no model_runtime, parsing error, missing source
+        content) leave the claim untouched and produce no feedback —
+        better silent than a false-positive that downgrades a real
+        claim.
+        """
+        if self._model_runtime is None or not claims:
+            return []
+        from competitive_intel_agents.prompts import AgentPromptLibrary
+
+        # Build a compact verification prompt: each claim with its
+        # full-source excerpts. Skip claims whose sources have no
+        # content_ref — without source text the verdict would be a
+        # hallucination.
+        verifiable: list[AnalysisClaim] = []
+        verification_payload: list[dict] = []
+        for claim in claims.values():
+            excerpts = []
+            for sid in claim.source_ids:
+                source = sources.get(sid)
+                if source is None:
+                    continue
+                content_ref = source.metadata.get("content_ref")
+                excerpt = _content_excerpt(content_ref, max_chars=4000)
+                if excerpt:
+                    excerpts.append({
+                        "source_id": sid,
+                        "url": source.url,
+                        "title": source.title,
+                        "excerpt": excerpt,
+                    })
+            if not excerpts:
+                continue
+            verifiable.append(claim)
+            verification_payload.append({
+                "claim_id": claim.id,
+                "text": claim.text,
+                "current_accuracy": claim.accuracy,
+                "sources": excerpts,
+            })
+        if not verifiable:
+            return []
+
+        task = (
+            "Cross-check each claim against the provided source excerpts. "
+            "For every claim_id, return one of: 'supported' (source text "
+            "directly backs the claim), 'partial' (some support but with "
+            "caveats or missing context), 'unsupported' (claim contradicts "
+            "or is not present in the sources). "
+            "Return JSON: {\"verdicts\": [{\"claim_id\": ..., "
+            "\"accuracy\": ..., \"evidence\": ...}, ...]}. "
+            "Be strict about 'supported' — when in doubt, prefer 'partial'."
+        )
+        prompt_context = {
+            "claims_to_verify": verification_payload,
+            "user_questions": context.request.questions,
+        }
+        prompt_lib = AgentPromptLibrary()
+        model_req = prompt_lib.build(self.name, task, prompt_context)
+        resp = self._model_runtime.complete(model_req)
+        if not resp.ok or not resp.parsed:
+            return []
+        verdicts = resp.parsed.get("verdicts", [])
+        if not isinstance(verdicts, list):
+            return []
+
+        feedback: list[ReviewFeedback] = []
+        for verdict in verdicts:
+            if not isinstance(verdict, dict):
+                continue
+            claim_id = str(verdict.get("claim_id", ""))
+            accuracy = str(verdict.get("accuracy", ""))
+            evidence = str(verdict.get("evidence", "")).strip()
+            claim = claims.get(claim_id)
+            if claim is None or accuracy not in {"supported", "partial", "unsupported"}:
+                continue
+            if accuracy == claim.accuracy:
+                # No change — skip the version bump entirely.
+                if accuracy == "unsupported":
+                    feedback.append(
+                        self._unsupported_claim_advisory(claim, evidence)
+                    )
+                continue
+            # Only persist a v2 when the verdict is non-default.
+            # 'supported' improves the user's confidence read but does
+            # not warrant lineage churn for every reviewer round.
+            if accuracy in {"partial", "unsupported"}:
+                self._save_verified_claim(claim, accuracy, evidence)
+            if accuracy == "unsupported":
+                feedback.append(
+                    self._unsupported_claim_advisory(claim, evidence)
+                )
+        return feedback
+
+    def _save_verified_claim(
+        self,
+        claim: AnalysisClaim,
+        accuracy: str,
+        evidence: str,
+    ) -> None:
+        """Persist a v2 of *claim* carrying the new accuracy verdict.
+
+        Skips silently on lineage collisions (a previous reviewer round
+        already saved a v2 for this claim) — the verdict is the same
+        run-level signal the next round would have produced.
+        """
+        from competitive_intel_agents.artifacts import DuplicateArtifactError
+
+        suffix = "_verified"
+        new_version = claim.version + 1
+        new_id = f"{claim.id}_v{new_version}{suffix}"
+        evidence_note = f"\nVerification ({accuracy}): {evidence}".strip()
+        replacement = replace(
+            claim,
+            id=new_id,
+            version=new_version,
+            supersedes_id=claim.id,
+            accuracy=accuracy,
+            reasoning=f"{claim.reasoning}{evidence_note}".strip(),
+        )
+        try:
+            self._artifacts.save_claim(replacement)
+        except DuplicateArtifactError:
+            return
+        # mark_superseded may not exist on every store impl — guard.
+        mark = getattr(self._artifacts, "mark_superseded", None)
+        if callable(mark):
+            try:
+                mark(claim.id, replacement.id)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _unsupported_claim_advisory(
+        claim: AnalysisClaim,
+        evidence: str,
+    ) -> ReviewFeedback:
+        message = (
+            f"Claim {claim.id!r} is not supported by its cited sources."
+        )
+        if evidence:
+            message += f" Evidence: {evidence[:200]}"
+        return ReviewFeedback(
+            issue="unsupported_claim",
+            target_agent="analyst",
+            target_artifact_id=claim.id,
+            message=message,
+            required_action=(
+                "Drop the claim or re-cite a source that directly supports it."
+            ),
+            severity="advisory",
+            blocking=False,
+        )
 
     def _review_report(
         self,
