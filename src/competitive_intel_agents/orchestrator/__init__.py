@@ -136,6 +136,27 @@ class Orchestrator:
                         report_id=self._latest_report_id(context.run_id),
                         review_feedback=[feedback],
                     )
+            if agent.name == "reviewer" and result.decision == "stop":
+                # Reviewer can ship the report while still attaching
+                # non-blocking advisories (e.g. claim cross-check
+                # verdicts marking an unsupported claim, see
+                # [[35-claim-source-cross-check]]). Surface those as
+                # caveats alongside the approved run so users see them
+                # without forcing another rework loop.
+                advisories = [
+                    fb for fb in result.review_feedback if not fb.blocking
+                ]
+                if advisories:
+                    timeout_result = self._timeout_result_if_due(context)
+                    if timeout_result is not None:
+                        return timeout_result
+                    return RunResult(
+                        run_id=context.run_id,
+                        status="approved_with_caveats",
+                        report_id=self._latest_report_id(context.run_id),
+                        review_feedback=[],
+                        caveats=advisories,
+                    )
 
         timeout_result = self._timeout_result_if_due(context)
         if timeout_result is not None:
@@ -196,21 +217,13 @@ class Orchestrator:
                     error=rework_result.status,
                 )
             if rework_result.final_decision == "stop":
-                return RunResult(
-                    run_id=context.run_id,
-                    status="approved",
-                    report_id=self._latest_report_id(context.run_id),
-                )
+                return self._approved_or_caveats_from_reviewer(context)
             latest_reviewer = self.journal.list_agent_events(
                 context.run_id,
                 "reviewer",
             )[-1:]
             if latest_reviewer and latest_reviewer[0].decision == "stop":
-                return RunResult(
-                    run_id=context.run_id,
-                    status="approved",
-                    report_id=self._latest_report_id(context.run_id),
-                )
+                return self._approved_or_caveats_from_reviewer(context)
             if latest_reviewer and latest_reviewer[0].review_feedback:
                 remaining_feedback = latest_reviewer[0].review_feedback
         report_id = self._latest_report_id(context.run_id)
@@ -242,6 +255,37 @@ class Orchestrator:
                 if feedback.target_agent == agent:
                     return feedback
         return feedback_items[0]
+
+    def _approved_or_caveats_from_reviewer(self, context: RunContext) -> RunResult:
+        """Build the success-path RunResult from the latest reviewer event.
+
+        If reviewer stopped with advisory (non-blocking) feedback —
+        e.g. ``unsupported_claim`` from the cross-check pass — the run
+        ships as ``approved_with_caveats`` so the user sees those
+        concerns alongside the report instead of a clean ``approved``.
+        """
+        report_id = self._latest_report_id(context.run_id)
+        latest_reviewer = self.journal.list_agent_events(
+            context.run_id, "reviewer",
+        )[-1:]
+        advisories: list[ReviewFeedback] = []
+        if latest_reviewer:
+            advisories = [
+                fb for fb in latest_reviewer[0].review_feedback if not fb.blocking
+            ]
+        if advisories:
+            return RunResult(
+                run_id=context.run_id,
+                status="approved_with_caveats",
+                report_id=report_id,
+                review_feedback=[],
+                caveats=advisories,
+            )
+        return RunResult(
+            run_id=context.run_id,
+            status="approved",
+            report_id=report_id,
+        )
 
     def _timeout_result_if_due(self, context: RunContext) -> RunResult | None:
         """Return a timeout RunResult if the wall-clock deadline has passed.

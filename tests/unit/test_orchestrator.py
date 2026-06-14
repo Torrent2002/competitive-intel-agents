@@ -577,3 +577,63 @@ def test_orchestrator_no_timeout_when_max_wall_time_is_none() -> None:
     # logic must not change behavior when disabled.
     assert result.status == "approved"
     assert result.error is None
+
+
+# ── Reviewer advisory → approved_with_caveats (Module 35) ──────
+
+
+def test_orchestrator_promotes_advisory_feedback_to_caveats() -> None:
+    """When reviewer stops with non-blocking advisory feedback (e.g.
+    a claim cross-check verdict), the run should ship as
+    approved_with_caveats so the user sees the concern alongside the
+    report instead of getting a clean approved that hides it."""
+
+    journal = InMemoryJournalStore()
+    advisory = ReviewFeedback(
+        issue="unsupported_claim",
+        target_agent="analyst",
+        target_artifact_id="claim_001",
+        message="Source contradicts claim text.",
+        required_action="Drop or re-cite.",
+        severity="advisory",
+        blocking=False,
+    )
+
+    class AdvisoryReviewerHarness:
+        def run_agent(self, context, agent):
+            if agent.name == "reviewer":
+                # Simulate a reviewer that finishes (decision=stop)
+                # but bundles advisory feedback alongside.
+                journal.append(
+                    RoundEvent(
+                        id=f"{context.run_id}:reviewer:1",
+                        run_id=context.run_id,
+                        agent="reviewer",
+                        round=1,
+                        decision="stop",
+                        signals=["approved"],
+                        review_feedback=[advisory],
+                    )
+                )
+                return AgentResult(
+                    agent="reviewer",
+                    decision="stop",
+                    rounds=1,
+                    review_feedback=[advisory],
+                )
+            return AgentResult(agent=agent.name, decision="stop", rounds=1)
+
+    orchestrator = Orchestrator(
+        journal=journal,
+        harness=AdvisoryReviewerHarness(),
+        max_wall_time=None,
+        run_id_factory=lambda: "run_advisory",
+    )
+
+    result = orchestrator.run(make_request())
+
+    assert result.status == "approved_with_caveats"
+    assert result.review_feedback == []
+    assert len(result.caveats) == 1
+    assert result.caveats[0].issue == "unsupported_claim"
+    assert result.caveats[0].blocking is False

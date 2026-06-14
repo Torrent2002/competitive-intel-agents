@@ -79,6 +79,10 @@ def claim_payload(claim: AnalysisClaim) -> dict:
         "source_ids": list(claim.source_ids),
         "confidence": claim.confidence,
         "reasoning": claim.reasoning,
+        # Reviewer cross-check verdict — see [[35-claim-source-cross-check]].
+        # Writer prompts use this to decide whether to flag the claim
+        # with a ⚠ marker in the report body.
+        "accuracy": claim.accuracy,
     }
 
 

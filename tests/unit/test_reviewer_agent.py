@@ -486,3 +486,193 @@ def test_reviewer_can_run_through_harness_without_tools() -> None:
     assert result.agent == "reviewer"
     assert result.decision == "stop"
     assert result.output_artifact_ids == ["report_run_001_001"]
+
+
+# ── Claim cross-check (Module 35) ──────────────────────────────
+
+
+class _ScriptedReviewerRuntime:
+    """Routes review-task and verify-task prompts to distinct payloads."""
+
+    def __init__(self, review_payload: dict, verify_payload: dict) -> None:
+        self._review = review_payload
+        self._verify = verify_payload
+        self.requests: list = []
+
+    def complete(self, request):
+        self.requests.append(request)
+        last_user = request.messages[-1]["content"] if request.messages else ""
+        # Verification prompt is uniquely identifiable by this token
+        # in the task description.
+        if "Cross-check each claim" in last_user:
+            return ModelResponse(ok=True, parsed=self._verify)
+        return ModelResponse(ok=True, parsed=self._review)
+
+
+def _build_full_report_store(tmp_path) -> tuple[InMemoryArtifactStore, str]:
+    """Two-competitor fully-sourced fixture with on-disk content_refs."""
+    store = InMemoryArtifactStore()
+    acme_path = tmp_path / "source_001.txt"
+    acme_path.write_text(
+        "Acme markets a team plan starting at $10/seat. Source attribution.",
+        encoding="utf-8",
+    )
+    beta_path = tmp_path / "source_002.txt"
+    beta_path.write_text(
+        "Beta has a published team plan with collaboration features.",
+        encoding="utf-8",
+    )
+    acme2_path = tmp_path / "source_003.txt"
+    acme2_path.write_text(
+        "Acme additional analyst coverage and overview.",
+        encoding="utf-8",
+    )
+    save_source(
+        store,
+        "source_001",
+        entity="Acme",
+        metadata={"content_ref": f"file:{acme_path}"},
+    )
+    save_source(
+        store,
+        "source_002",
+        entity="Beta",
+        metadata={"content_ref": f"file:{beta_path}"},
+    )
+    save_source(
+        store,
+        "source_003",
+        entity="Acme",
+        metadata={"content_ref": f"file:{acme2_path}"},
+    )
+    save_claim(store, "claim_001", source_ids=["source_001"])
+    save_claim(store, "claim_002", source_ids=["source_002"])
+    save_claim(store, "claim_003", source_ids=["source_003"])
+    save_report(
+        store,
+        claim_ids=["claim_001", "claim_002", "claim_003"],
+        source_ids=["source_001", "source_002", "source_003"],
+        sections={
+            "Overview": "Summary covering Acme and Beta competitors.",
+            "Feature comparison": "Comparison.",
+            "Pricing": "Pricing.",
+            "SWOT": "SWOT.",
+            "Sources": "- source_001\n- source_002\n- source_003",
+        },
+    )
+    return store, "report_run_001_001"
+
+
+def test_reviewer_cross_check_marks_unsupported_claim_advisory(tmp_path) -> None:
+    store, _ = _build_full_report_store(tmp_path)
+    runtime = _ScriptedReviewerRuntime(
+        review_payload={"feedback": []},
+        verify_payload={
+            "verdicts": [
+                {"claim_id": "claim_001", "accuracy": "supported", "evidence": "ok"},
+                {
+                    "claim_id": "claim_002",
+                    "accuracy": "unsupported",
+                    "evidence": "Source mentions a free plan, not a team plan.",
+                },
+            ]
+        },
+    )
+    agent = ReviewerAgent(store, model_runtime=runtime)
+    result = agent.run_round(make_context(), AgentState(agent="reviewer", round=1))
+
+    # Reviewer still finishes (no blocking feedback) but ships the
+    # advisory in review_feedback so the orchestrator's
+    # approved_with_caveats branch can promote it to caveats.
+    assert result.completed is True
+    advisories = [fb for fb in result.review_feedback if not fb.blocking]
+    assert len(advisories) == 1
+    assert advisories[0].issue == "unsupported_claim"
+    assert advisories[0].target_artifact_id == "claim_002"
+    assert advisories[0].severity == "advisory"
+    # Claim was rewritten to v2 with accuracy=unsupported, lineage chain intact.
+    claim_v2 = store.get_artifact("claim_002_v2_verified")
+    assert claim_v2.accuracy == "unsupported"
+    assert claim_v2.supersedes_id == "claim_002"
+
+
+def test_reviewer_cross_check_does_not_bump_supported_claim(tmp_path) -> None:
+    """A 'supported' verdict must NOT version-bump the claim — that
+    would flood the artifact store with v2 noise on every reviewer
+    round when nothing actually changed."""
+    store, _ = _build_full_report_store(tmp_path)
+    runtime = _ScriptedReviewerRuntime(
+        review_payload={"feedback": []},
+        verify_payload={
+            "verdicts": [
+                {"claim_id": "claim_001", "accuracy": "supported", "evidence": "ok"},
+                {"claim_id": "claim_002", "accuracy": "supported", "evidence": "ok"},
+            ]
+        },
+    )
+    agent = ReviewerAgent(store, model_runtime=runtime)
+    result = agent.run_round(make_context(), AgentState(agent="reviewer", round=1))
+
+    assert result.completed is True
+    assert result.review_feedback == []
+    # Original claims still v1 and unchanged.
+    assert store.get_artifact("claim_001").version == 1
+    assert store.get_artifact("claim_002").version == 1
+
+
+def test_reviewer_skips_cross_check_without_model_runtime(tmp_path) -> None:
+    """Without a model_runtime the verification step is silently
+    skipped so deterministic / fake-pipeline runs are unaffected."""
+    store, _ = _build_full_report_store(tmp_path)
+    agent = ReviewerAgent(store, model_runtime=None)
+
+    result = agent.run_round(make_context(), AgentState(agent="reviewer", round=1))
+
+    assert result.completed is True
+    # Claims untouched.
+    assert store.get_artifact("claim_001").accuracy == "unverified"
+    assert store.get_artifact("claim_002").accuracy == "unverified"
+
+
+def test_reviewer_skips_cross_check_when_source_content_missing() -> None:
+    """If sources have no content_ref on disk, skip verification —
+    judging the claim against just title+snippet would hallucinate."""
+    store = InMemoryArtifactStore()
+    save_source(store, "source_001", entity="Acme")  # no content_ref
+    save_source(store, "source_002", entity="Beta")
+    save_source(store, "source_003", entity="Acme")
+    save_claim(store, "claim_001", source_ids=["source_001"])
+    save_claim(store, "claim_002", source_ids=["source_002"])
+    save_claim(store, "claim_003", source_ids=["source_003"])
+    save_report(
+        store,
+        claim_ids=["claim_001", "claim_002", "claim_003"],
+        source_ids=["source_001", "source_002", "source_003"],
+        sections={
+            "Overview": "Summary covering Acme and Beta competitors.",
+            "Feature comparison": "Comparison.",
+            "Pricing": "Pricing.",
+            "SWOT": "SWOT.",
+            "Sources": "- source_001\n- source_002\n- source_003",
+        },
+    )
+    runtime = _ScriptedReviewerRuntime(
+        review_payload={"feedback": []},
+        # If this verdict ever reached the agent, claim_001 would be
+        # downgraded — but content_ref is missing so verification must
+        # short-circuit before touching the model.
+        verify_payload={
+            "verdicts": [
+                {"claim_id": "claim_001", "accuracy": "unsupported", "evidence": "x"},
+            ]
+        },
+    )
+    agent = ReviewerAgent(store, model_runtime=runtime)
+    result = agent.run_round(make_context(), AgentState(agent="reviewer", round=1))
+
+    assert result.completed is True
+    assert result.review_feedback == []
+    assert store.get_artifact("claim_001").accuracy == "unverified"
+    # No verification call — the only model request would be the
+    # primary review (which we kept as feedback=[] so the run passes).
+    assert len(runtime.requests) <= 1
